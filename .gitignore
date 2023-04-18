@@ -1,6 +1,6 @@
 # specific repo ignores
 config.yaml
-python\ooi_data_explorations\qartod\cgsn\results
+python/ooi_data_explorations/qartod/cgsn/results/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

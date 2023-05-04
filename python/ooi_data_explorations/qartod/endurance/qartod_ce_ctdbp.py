@@ -120,7 +120,6 @@ def generate_qartod(site, node, sensor, cut_off):
 
     # create the initial gross range entry
     gr_lookup = process_gross_range(data, parameters, limits, site=site, node=node, sensor=sensor)
-    print(gr_lookup)
 
     # replicate it three times for the different streams
     gr_lookup = pd.concat([gr_lookup] * 3, ignore_index=True)

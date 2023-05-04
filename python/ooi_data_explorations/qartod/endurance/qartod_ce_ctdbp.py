@@ -109,7 +109,7 @@ def generate_qartod(site, node, sensor, cut_off):
     data = data.sel(time=slice('2014-01-01T00:00:00', end_date))
 
     # set the parameters and the sensor range limits
-    parameters = ['seawater_conductivity', 'seawater_temperature', 'seawater_pressure', 'practical_salinity']
+    parameters = ['sea_water_electrical_conductivity', 'sea_water_temperature', 'sea_water_pressure', 'sea_water_practical_salinity']
 
     if site == 'CE09OSSM' and node == 'MFD37':
         plimit = [0, 600]   # 600 m stain gauge pressure sensor

@@ -918,6 +918,8 @@ def merge_frames(frames):
         warnings.warn(message)
 
     data = data.sortby(['deployment', 'time'])
+    _, index = np.unique(data['time'], return_index=True)
+    data = data.isel(time=index)
     data.attrs['time_coverage_start'] = ('%sZ' % data.time.min().values)
     data.attrs['time_coverage_end'] = ('%sZ' % data.time.max().values)
     data.attrs['time_coverage_resolution'] = ('P%.2fS' % (np.mean(data.time.diff('time').values).astype(float) / 1e9))
@@ -989,12 +991,26 @@ def update_dataset(ds, depth):
             lon = ds.attrs['lon'][0]
         del(ds.attrs['lat'])
         del(ds.attrs['lon'])
+    
+    # use depth, if available, to set the vertical coordinate
+    if 'depth' in ds.variables:
+        deploy_depth = depth
+        min_depth = ds.depth.min().values
+        max_depth = ds.depth.max().values
+    else:
+        deploy_depth = depth
+        min_depth = depth
+        max_depth = depth
+
+    # update the global attributes with the depth ranges
+    ds.attrs['geospatial_vertical_min'] = min_depth
+    ds.attrs['geospatial_vertical_max'] = max_depth
 
     # add the geospatial coordinates using the station identifier from above as the dimension
     geo_coords = xr.Dataset({
         'lat': ('station', [lat]),
         'lon': ('station', [lon]),
-        'z': ('station', [depth])
+        'z': ('station', [deploy_depth])
     }, coords={'station': [ds.attrs['subsite'].upper()]})
 
     geo_attrs = dict({
@@ -1021,7 +1037,8 @@ def update_dataset(ds, depth):
             'long_name': 'Depth',
             'standard_name': 'depth',
             'units': 'm',
-            'comment': 'Instrument deployment depth',
+            'comment': ('Depth of the instrument, either from the deployment depth (e.g. 7 m for an NSIF) or the '
+                'average depth calculated from the instrument pressure record.'),
             'positive': 'down',
             'axis': 'Z'
         }

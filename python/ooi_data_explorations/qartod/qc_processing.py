@@ -496,12 +496,14 @@ def process_gross_range(ds, parameters, sensor_range, **kwargs):
 
             # create the formatted dictionary
             user_range = [np.round(lower, decimals=5), np.round(upper, decimals=5)]
-            qc_dict = format_gross_range(param, sensor_range[idx], user_range, site, node, sensor, stream, source)
+            qc_dict = format_gross_range(param, sensor_range[idx], user_range, site, node, sensor, stream, notes)
 
             # append the dictionary to the dataframe
-            gross_range = gross_range.append(qc_dict, ignore_index=True)
+            df = (pd.Series(qc_dict).to_frame()).transpose()
+            gross_range.append(df)
 
     # return the results
+    gross_range = pd.concat(gross_range, ignore_index=True, sort=False)
     return gross_range
 
 

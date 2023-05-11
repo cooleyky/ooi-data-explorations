@@ -2,8 +2,11 @@
 # -*- coding: utf-8 -*-
 """
 @author Kylene Cooley
-@brief Calls single instance of data request and processing to obtain the sea water practical 
-    salinity climatology lookup table for one node of Coastal Endurance Array.
+@brief Calls single instance of data request and processing to obtain the gross range
+    and climatology lookup tables for the near-surface instrument frame on the Inshore 
+    Surface Mooring of the Coastal Endurance Array. Then script retrieves lookup tables 
+    posted to ocean-observatories/qc-lookup and evaluates the difference between online 
+    and recalculated suspect ranges.
 """
 from ooi_data_explorations.qartod.endurance.qartod_ce_ctdbp import generate_qartod, ANNO_HEADER, CLM_HEADER, GR_HEADER
 import os

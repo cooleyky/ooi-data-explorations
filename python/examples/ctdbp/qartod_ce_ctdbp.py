@@ -5,10 +5,10 @@
 @brief Calls single instance of data request and processing to obtain the sea water practical 
     salinity climatology lookup table for one node of Coastal Endurance Array.
 """
-from ooi_data_explorations.qartod.endurance.qartod_ce_ctdbp import generate_qartod, ANNO_HEADER, CLM_HEADER
+from ooi_data_explorations.qartod.endurance.qartod_ce_ctdbp import generate_qartod, ANNO_HEADER, CLM_HEADER, GR_HEADER
 import os
 
-# outline of qartod_ce_ctdbp.main() below minus the gross range table, and set data stream variables 
+# outline of qartod_ce_ctdbp.main() below and set data stream variables 
 #   that are usually set with ooi_data_explorations.common.inputs()
 
 # setup the input arguments
@@ -18,7 +18,7 @@ sensor = '06-CTDBPC000'
 cut_off = '2021-01-01T00:00:00'
 
 # create the QARTOD gross range and climatology lookup values and tables
-annotations, _, clm_lookup, clm_table = generate_qartod(site, node, sensor, cut_off)
+annotations, gr_lookup, clm_lookup, clm_table = generate_qartod(site, node, sensor, cut_off)
 
 # save the downloaded annotations and qartod lookups and tables
 out_path = os.path.join(os.path.expanduser('~'), 'ooidata/qartod/ctdbp')
@@ -29,6 +29,10 @@ if not os.path.exists(out_path):
 # save the annotations to a csv file for further processing
 anno_csv = '-'.join([site, node, sensor]) + '.quality_annotations.csv'
 annotations.to_csv(os.path.join(out_path, anno_csv), index=False, columns=ANNO_HEADER)
+
+# save the gross range values to a csv for further processing
+gr_csv = '-'.join([site, node, sensor]) + '.gross_range.csv'
+gr_lookup.to_csv(os.path.join(out_path, gr_csv), index=False, columns=GR_HEADER)
 
 # save the climatology values and table to a csv for further processing
 clm_csv = '-'.join([site, node, sensor]) + '.climatology.csv'

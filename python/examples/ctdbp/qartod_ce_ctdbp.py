@@ -13,6 +13,8 @@ import os
 import requests
 import pandas as pd
 import re
+import io
+import ast 
 
 # outline of qartod_ce_ctdbp.main() below and set data stream variables 
 #   that are usually set with ooi_data_explorations.common.inputs()
@@ -23,7 +25,7 @@ node = 'SBD17'
 sensor = '06-CTDBPC000'
 cut_off = '2021-01-01T00:00:00'
 
-refdes = '-'.join(site, node, sensor)
+refdes = '-'.join([site, node, sensor])
 
 # create the QARTOD gross range and climatology lookup values and tables
 annotations, gr_lookup, clm_lookup, clm_table = generate_qartod(site, node, sensor, cut_off)

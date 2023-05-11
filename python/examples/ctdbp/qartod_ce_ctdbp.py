@@ -10,6 +10,9 @@
 """
 from ooi_data_explorations.qartod.endurance.qartod_ce_ctdbp import generate_qartod, ANNO_HEADER, CLM_HEADER, GR_HEADER
 import os
+import requests
+import pandas as pd
+import re
 
 # outline of qartod_ce_ctdbp.main() below and set data stream variables 
 #   that are usually set with ooi_data_explorations.common.inputs()
@@ -19,6 +22,8 @@ site = 'CE01ISSM'
 node = 'SBD17'
 sensor = '06-CTDBPC000'
 cut_off = '2021-01-01T00:00:00'
+
+refdes = '-'.join(site, node, sensor)
 
 # create the QARTOD gross range and climatology lookup values and tables
 annotations, gr_lookup, clm_lookup, clm_table = generate_qartod(site, node, sensor, cut_off)
@@ -45,3 +50,77 @@ for i in range(len(parameters)):
     tbl = '-'.join([site, node, sensor, parameters[i]]) + '.csv'
     with open(os.path.join(out_path, tbl), 'w') as clm:
         clm.write(clm_table[i])
+
+
+# retrieve lookup tables from ocean-observatories/qc-lookup
+# functions defined below from Testing.ipynb by Andrew Reed
+GITHUB_BASE_URL = "https://raw.githubusercontent.com/oceanobservatories/qc-lookup/master/qartod"
+
+def load_gross_range_qartod_test_values(refdes, stream, ooinet_param):
+    """
+    Load the gross range QARTOD test from gitHub
+    """
+    subsite, node, sensor = refdes.split("-", 2)
+    sensor_type = sensor[3:8].lower()
+    
+    # gitHub url to the gross range table
+    GROSS_RANGE_URL = f"{GITHUB_BASE_URL}/{sensor_type}/{sensor_type}_qartod_gross_range_test_values.csv"
+    
+    # Download the results
+    download = requests.get(GROSS_RANGE_URL)
+    if download.status_code == 200:
+        df = pd.read_csv(io.StringIO(download.content.decode('utf-8')))
+        df["parameters"] = df["parameters"].apply(ast.literal_eval)
+        df["qcConfig"] = df["qcConfig"].apply(ast.literal_eval)
+        
+    # Next, filter for the desired parameter
+    mask = df["parameters"].apply(lambda x: True if x.get("inp") == ooinet_param else False)
+    df = df[mask]
+    
+    # Now filter for the desired stream
+    df = df[(df["subsite"] == subsite) & 
+            (df["node"] == node) & 
+            (df["sensor"] == sensor) &
+            (df["stream"] == stream)]
+    
+    return df
+
+def load_climatology_qartod_test_values(refdes, param):
+    """
+    Load the OOI climatology qartod test values table from gitHub
+    
+    Parameters
+    ----------
+    refdes: str
+        The reference designator for the given sensor
+    param: str
+        The name of the 
+    """
+    
+    site, node, sensor = refdes.split("-", 2)
+    sensor_type = sensor[3:8].lower()
+    
+    # gitHub url to the climatology tables
+    CLIMATOLOGY_URL = f"{GITHUB_BASE_URL}/{sensor_type}/climatology_tables/{refdes}-{param}.csv"
+    
+    # Download the results
+    download = requests.get(CLIMATOLOGY_URL)
+    if download.status_code == 200:
+        df = pd.read_csv(io.StringIO(download.content.decode('utf-8')), index_col=0)
+        df = df.applymap(ast.literal_eval)
+    else:
+        return None
+    return df
+
+# load the gross range QARTOD table for a specific parameter
+stream = "ctdbp.+"   # in regex .+ is a wildcard that works the same as * in MATLAB
+gross_range_qartod_test_values = load_gross_range_qartod_test_values(refdes, stream, "ctdbp_seawater_temperature")
+gross_range_qartod_test_values
+
+# Example: load the climatology QARTOD table for a specific parameter
+climatology_qartod_test_values = load_climatology_qartod_test_values(refdes, "ctdbp_seawater_temperature")
+climatology_qartod_test_values
+
+# calculate difference between published and recalculated values
+# gross range difference
+# parameter climatologies differences 

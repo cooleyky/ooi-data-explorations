@@ -8,4 +8,4 @@
 import ooi_data_explorations.qartod.endurance.qartod_ce_ctdbp as qartod_ce
 
 
-qartod_ce.main(['-s', 'CE01ISSM', '-n', 'SBD17', '-sn', '06-CTDBPC000', '-co', '2021-01-01T00:00:00'])
+qartod_ce.main(['-s', 'CE09OSSM', '-n', 'MFD37', '-sn', '03-CTDBPE000', '-co', '2021-01-01T00:00:00'])

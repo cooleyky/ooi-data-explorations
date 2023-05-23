@@ -7,6 +7,8 @@
     Surface Mooring of the Coastal Endurance Array. Then script retrieves lookup tables 
     posted to ocean-observatories/qc-lookup and evaluates the difference between online 
     and recalculated suspect ranges.
+    Lookup table section modified from the process of calculating climatology and gross range QARTOD test 
+    thresholds for Coastal Endurance CTDBP by Chris Wingard. 
 """
 from ooi_data_explorations.qartod.endurance.qartod_ce_ctdbp import generate_qartod, ANNO_HEADER, CLM_HEADER, GR_HEADER
 import os

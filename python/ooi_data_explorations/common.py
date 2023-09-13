@@ -484,6 +484,9 @@ def add_annotation_qc_flags(ds, annotations):
     stream = ds.attrs["stream"]
     stream_mask = annotations["stream"].apply(lambda x: True if x == stream or x is None else False)
     annotations = annotations[stream_mask]
+    method = ds.attrs["collection_method"]
+    method_mask = annotations["method"].apply(lambda x: True if x == method or x is None else False)
+    annotations = annotations[method_mask]
 
     # Explode the annotations so each parameter is hit for each
     # annotation

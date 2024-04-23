@@ -10,7 +10,6 @@
 """
 import argparse
 import glob
-
 import dask
 import io
 import netrc
@@ -44,7 +43,7 @@ SESSION.mount('https://', adapter)
 
 # set up constants used in parallel and multithreading processing
 N_CORES = min(16, int(os.cpu_count() / 2) - 1)  # number of physical cores to use for parallel processing
-N_THREADS = min(16, int(os.cpu_count() / 2) + 4)  # number of threads to use for multithreading operations
+N_THREADS = os.cpu_count()  # number of threads to use for multithreading operations (1 per core)
 
 # set the base URL for the M2M interface
 BASE_URL = 'https://ooinet.oceanobservatories.org/api/m2m/'  # base M2M URL
@@ -91,7 +90,6 @@ CONFIG = {
 
 # Default NetCDF encodings for CF compliance
 ENCODINGS = {
-    'time': {'_FillValue': None},
     'lon': {'_FillValue': None},
     'lat': {'_FillValue': None},
     'z': {'_FillValue': None}
@@ -474,9 +472,9 @@ def add_annotation_qc_flags(ds, annotations):
         'not_evaluated': 2,
         'suspect': 3,
         'fail': 4,
-        'not_operational': 9,
-        'not_available': 9,
-        'pending_ingest': 9
+        'not_operational': 0,
+        'not_available': 0,
+        'pending_ingest': 0
     }
     annotations['qcFlag'] = annotations['qcFlag'].map(codes).astype('category')
 
@@ -497,12 +495,11 @@ def add_annotation_qc_flags(ds, annotations):
         else:
             pid = str(pid)
             param_info = get_parameter_information(pid)
-            param_name = param_info["name"]
+            param_name = param_info["netcdf_name"]
         stream_annos.update({param_name: pid})
 
     # Next, get the flags associated with each parameter or all parameters
     flags_dict = {}
-
     for key in stream_annos.keys():
         # Get the pid and associated name
         pid_name = key
@@ -517,15 +514,14 @@ def add_annotation_qc_flags(ds, annotations):
         pid_annos = pid_annos.sort_values(by="qcFlag")
 
         # Create an array of flags to begin setting the qc-values
-        pid_flags = pd.Series(np.zeros(ds.time.values.shape),
-                              index=ds.time.values)
+        pid_flags = pd.Series(np.zeros(ds.time.values.shape), index=ds.time.values)
 
         # For each index, set the qcFlag for each respective time period
         for ind in pid_annos.index:
             beginDT = pid_annos["beginDT"].loc[ind]
             endDT = pid_annos["endDT"].loc[ind]
             qcFlag = pid_annos["qcFlag"].loc[ind]
-            # Convert the time to actual datetimes
+            # Convert the time to actual date times
             beginDT = convert_time(beginDT)
             if endDT is None or np.isnan(endDT):
                 endDT = datetime.now()
@@ -538,12 +534,15 @@ def add_annotation_qc_flags(ds, annotations):
         flags_dict.update({pid_name: pid_flags})
 
     # Create a rollup flag
-    rollup_flags = flags_dict.get("rollup")
-    for key in flags_dict:
-        flags = np.max([rollup_flags, flags_dict.get(key)], axis=0)
-        rollup_flags = pd.Series(flags, index=rollup_flags.index)
-    # Replace the "All" with the rollup results
-    flags_dict["rollup"] = rollup_flags
+    # rollup_flags = flags_dict.get("rollup")
+    # for key in flags_dict:
+    #     flags = np.max([rollup_flags, flags_dict.get(key)], axis=0)
+    #     rollup_flags = pd.Series(flags, index=rollup_flags.index)
+    # # Replace the "All" with the rollup results
+    # flags_dict["rollup"] = rollup_flags
+    # --> We need to allow for one variable to be flagged without affecting all the others. With the above block,
+    # --> if one variable was flagged, all variables would be flagged via the rollup. By commenting out the above
+    # --> block, we allow for one variable to be flagged without affecting the others.
 
     # Add the flag results to the dataset for key in flags_dict
     for key in flags_dict.keys():
@@ -699,7 +698,7 @@ def m2m_collect(data, tag='.*\\.nc$', use_dask=False):
     else:
         # multiple files, use multithreading to download concurrently
         part_files = partial(process_file, gc='M2M', use_dask=use_dask)
-        with ThreadPoolExecutor(max_workers=N_CORES) as executor:
+        with ThreadPoolExecutor(max_workers=N_THREADS) as executor:
             frames = list(tqdm(executor.map(part_files, files), total=len(files),
                                desc='Downloading and Processing Data Files', file=sys.stdout))
 
@@ -773,7 +772,7 @@ def gc_collect(dataset_id, tag='.*\\.nc$', use_dask=False):
     else:
         # multiple files, use multithreading to download concurrently
         part_files = partial(process_file, gc='GC', use_dask=use_dask)
-        with ThreadPoolExecutor(max_workers=N_CORES) as executor:
+        with ThreadPoolExecutor(max_workers=N_THREADS) as executor:
             frames = list(tqdm(executor.map(part_files, files), total=len(files),
                                desc='Downloading and Processing Data Files', file=sys.stdout))
 
@@ -924,9 +923,9 @@ def process_file(catalog_file, gc=None, use_dask=False):
         raise InputError('gc must be either GC, M2M, or KDATA')
 
     if use_dask:
-        ds = xr.open_dataset(data, decode_cf=False, chunks='auto')
+        ds = xr.open_dataset(data, decode_cf=False, chunks='auto', mask_and_scale=False)
     else:
-        ds = xr.load_dataset(data, decode_cf=False)
+        ds = xr.load_dataset(data, decode_cf=False, mask_and_scale=False)
 
     # convert the dimensions from obs to time and get rid of obs and other variables we don't need
     ds = ds.swap_dims({'obs': 'time'})
@@ -947,6 +946,7 @@ def process_file(catalog_file, gc=None, use_dask=False):
                 if time_pattern.match(ds[v].attrs['units']):
                     del(ds[v].attrs['_FillValue'])  # no fill values for time!
                     ds[v].attrs['units'] = 'seconds since 1900-01-01T00:00:00.000Z'
+                    ds[v].encoding = {'_FillValue': None, 'units': 'seconds since 1900-01-01T00:00:00.000Z'}
                     np_time = ntp_date + (ds[v] * 1e9).astype('timedelta64[ns]')
                     ds[v] = np_time
 
@@ -1209,13 +1209,17 @@ def update_dataset(ds, depth):
                 ds[ancillary].attrs['ancillary_variables'] = v
 
     # convert the time values from a datetime64[ns] object to a floating point number with the time in seconds
-    ds['time'] = dt64_epoch(ds.time)
+    # ds['time'] = dt64_epoch(ds.time)
     ds['time'].attrs = dict({
         'long_name': 'Time',
         'standard_name': 'time',
-        'units': 'seconds since 1970-01-01T00:00:00Z',
         'axis': 'T',
-        'calendar': 'gregorian'
+    })
+    ds['time'].encoding = dict({
+        '_FillValue': None,
+        'units': 'seconds since 1900-01-01T00:00:00.000Z',
+        'calendar': 'standard',
+        'dtype': 'float64'
     })
 
     # convert all float64 values to float32 (except for the timestamps), helps minimize file size

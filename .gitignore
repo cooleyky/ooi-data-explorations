@@ -1,6 +1,5 @@
 # specific repo ignores
 config.yaml
-python/ooi_data_explorations/qartod/cgsn/results/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -113,5 +112,7 @@ venv.bak/
 
 # R
 .Rhistory
-python/utilities/ooi-data-explorations - Shortcut.lnk
-python/ooi_data_explorations/qartod/cgsn/scripts/data/CTDBP_datasets.csv
+
+# Custom
+*.jpg
+*.mp4

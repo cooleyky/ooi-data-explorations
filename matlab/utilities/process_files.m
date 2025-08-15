@@ -16,10 +16,11 @@ function nc_files = list_files(url, tag)
 % cwingard 2023-07-09
 
 % use webread to scrape the catalog
-catalog = webread(url);
+options = weboptions('ContentType', 'text');
+catalog = webread(url, options);
 
 % pull a list of netCDF files out of the catalog
-nc_all = regexp(catalog, '<a href=''([^>]+.nc)''>', 'tokens');
+nc_all = regexp(catalog, '<a href="([^>]+.nc)">', 'tokens');
 
 % cell elements are themselves cells, convert to cell array of character vectors
 nc_all = [nc_all{:}]';
@@ -37,7 +38,7 @@ nc_files = string(nc_all(:));
 
 % check to see if we found any files to download, if not throw an error
 if size(nc_files, 1) == 0
-    error("Unable to find any files to download using %s at %s", [tag, url])
+    warning("Unable to find any files to download using tag '%s' from '%s'", tag, url)
 end %if
 end %function
 
@@ -72,9 +73,10 @@ if sum(m) == 1
             'table', 'table', 'table'};
         data = addprop(data, prop_names, prop_types);    
         for i = 1:size(prop_types, 2)
-            m = reshape(strcmp({file_info.Attributes.Name}, prop_names{i}), ...
-                size(file_info.Attributes));
-            data.Properties.CustomProperties.(prop_names{i}) = file_info.Attributes(m).Value;
+            m = reshape(strcmp({file_info.Attributes.Name}, prop_names{i}), size(file_info.Attributes));
+            if sum(m) == 1
+                data.Properties.CustomProperties.(prop_names{i}) = file_info.Attributes(m).Value;
+            end %if
         end %for
         clear prop_names prop_types i
     end %if
@@ -106,7 +108,7 @@ if nframes > 1
                 m = ~ismember(frames{i-1}.Properties.VariableNames, frames{i}.Properties.VariableNames);
                 varnames = frames{i-1}.Properties.VariableNames(m);
                 t = frames{i};
-                for j = numel(varnames)
+                for j = 1:numel(varnames)
                     t = addvars(t, repmat(convertTo(t.Time, "datenum"), 1, 1) .* -inf, 'NewVariableNames', varnames{j});
                 end %for
                 frames{i} = t;
@@ -114,7 +116,7 @@ if nframes > 1
                 m = ~ismember(frames{i}.Properties.VariableNames, frames{i-1}.Properties.VariableNames);
                 varnames = frames{i}.Properties.VariableNames(m);
                 t = frames{i-1};
-                for j = numel(varnames)
+                for j = 1:numel(varnames)
                     t = addvars(t, repmat(convertTo(t.Time, "datenum"), 1, 1) .* -inf, 'NewVariableNames', varnames{j});
                 end %for
                 frames{i-1} = t;

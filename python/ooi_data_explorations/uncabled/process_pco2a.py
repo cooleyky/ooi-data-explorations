@@ -209,7 +209,7 @@ def quality_checks(ds, param, fail_min, fail_max, window="12H", center=True):
 
     # Add the attributes
     ds[param + "_quality_flag"].attrs = {
-        "standard_name": param + "qc_flag",
+        "standard_name": "quality_flag",
         "long_name": f"QC Flag for {param}",
         "comment": "Flag which attempts to identify low-pCO2 values due to the re-zeroing sampling issue " +
                    "of the Pro-Oceanus with occurs about once every 12H."

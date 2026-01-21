@@ -63,7 +63,7 @@ def quality_checks(ds):
             flags[m] = 9
 
         # add the qc_flags to the dataset, rolling up the results into a single value
-        qc_summary = p + '_qc_summary_flag'
+        qc_summary = p + '_quality_flag'
         if qc_summary in ds.variables:
             # add the new test results to the existing QC summary results
             qc = ds[qc_summary]
@@ -76,7 +76,7 @@ def quality_checks(ds):
         # set up the attributes for the new variable
         ds[qc_summary].attrs = dict({
             'long_name': '%s QC Summary Flag' % ds[p].attrs['long_name'],
-            'standard_name': 'aggregate_quality_flag',
+            'standard_name': 'quality_flag',
             'comment': ('Summary quality flag combining the results of the instrument-specific quality tests with '
                         'existing OOI QC tests, if available, to create a single QARTOD style aggregate quality flag'),
             'flag_values': np.array([1, 2, 3, 4, 9]),

@@ -44,8 +44,6 @@ dependencies = [
     "argcomplete",
     "beautifulsoup4",
     "canyonbpy",
-    "cgsn_parsers @ https://bitbucket.org/ooicgsn/cgsn-parsers/get/master.zip",
-    "cgsn_processing @ https://bitbucket.org/ooicgsn/cgsn-processing/get/master.zip",
     "distributed",
     "ephem",
     "erddapy",
@@ -65,14 +63,19 @@ dependencies = [
     "pyco2sys",
     "pyncml",
     "pysolar",
-    "pyseas @ https://bitbucket.org/ooicgsn/pyseas/get/develop.zip",
     "PyYAML",
     "s3fs",
     "scikit-learn",
     "sphinx",
     "tqdm",
-    "xlrd"]
+    "xlrd",
+]
+
 [project.optional-dependencies]
+# cgsn-parsers and cgsn-processing are available on conda-forge:
+#   conda install -c conda-forge cgsn-parsers cgsn-processing
+# pyseas is not on PyPI or conda-forge and must be installed directly:
+#   pip install https://bitbucket.org/ooicgsn/pyseas/get/develop.zip
 dev = [
     "pre-commit",
     "ruff",

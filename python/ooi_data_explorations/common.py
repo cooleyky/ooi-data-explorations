@@ -25,9 +25,9 @@ import pandas as pd
 
 from bs4 import BeautifulSoup
 from collections.abc import Mapping
-from concurrent.futures import ProcessPoolExecutor
+from dask import delayed, compute
+from dask.diagnostics import ProgressBar
 from datetime import datetime, timezone
-from functools import partial
 from requests.adapters import HTTPAdapter
 from tqdm import tqdm
 from urllib3.util import Retry
@@ -42,7 +42,8 @@ adapter = HTTPAdapter(max_retries=retry)
 SESSION.mount('https://', adapter)
 
 # set up constants used in parallel processing
-N_CORES = min(10, int(os.cpu_count() / 2) - 1)  # number of physical cores to use for parallel processing
+N_CORES = min(5, int(os.cpu_count() / 2) - 1)  # number of physical cores to use for parallel processing
+MIN_FILES_FOR_PARALLEL = 5  # minimum number of files to justify using parallel processing
 
 # set the base URL for the M2M interface
 BASE_URL = 'https://ooinet.oceanobservatories.org/api/m2m/'  # base M2M URL
@@ -723,26 +724,16 @@ def m2m_collect(data, tag='.*\\.nc$', use_dask=False):
     # Create a list of the files from the request above using a simple regex as a tag to discriminate the files
     url = [url for url in data['allURLs'] if re.match(r'.*thredds.*', url)][0]
     files = list_files(url, tag)
-    frames = []
 
     # Process the data files found above and concatenate into a single data set
-    print('Downloading %d data file(s) from the user''s OOI M2M THREDDS catalog' % len(files))
-    if len(files) <= 5:
-        # just 1 to 5 files, download sequentially
-        frames = [process_file(file, gc='M2M', use_dask=use_dask) for file in tqdm(files, desc='Downloading and '
-                                                                                               'Processing the Data '
-                                                                                               'Files')]
-    else:
-        # multiple files, use multithreading to download concurrently
-        part_files = partial(process_file, gc='M2M', use_dask=use_dask)
-        with ProcessPoolExecutor(max_workers=N_CORES) as executor:
-            frames = list(tqdm(executor.map(part_files, files), total=len(files),
-                               desc='Downloading and Processing the Data Files', file=sys.stdout))
+    print('Downloading %d data file(s) from the user\'s OOI M2M THREDDS catalog' % len(files))
+    frames = parallel_process_files(files, gc='M2M', use_dask=use_dask,
+                                    desc='Downloading and Processing the Data Files')
 
     if not frames:
         message = 'No data files were downloaded from the user''s M2M THREDDS server.'
         warnings.warn(message)
-        return None
+        return xr.Dataset()  # Return an empty dataset if no files were found
 
     # merge the data frames into a single data set
     print('Merging the data files into a single dataset')
@@ -800,26 +791,16 @@ def gc_collect(dataset_id, tag='.*\\.nc$', use_dask=False):
 
     # Create a list of the files from the request above using a simple regex as a tag to discriminate the files
     files = list_files(url, tag)
-    frames = []
 
     # Process the data files found above and concatenate them into a single list
-    print('Downloading %d data file(s) from the OOI Gold Copy THREDSS catalog' % len(files))
-    if len(files) <= 5:
-        # just 1 to 5 files, download sequentially
-        frames = [process_file(file, gc='GC', use_dask=use_dask) for file in tqdm(files, desc='Downloading and '
-                                                                                              'Processing the Data '
-                                                                                              'Files')]
-    else:
-        # multiple files, use multithreading to download concurrently
-        part_files = partial(process_file, gc='GC', use_dask=use_dask)
-        with ProcessPoolExecutor(max_workers=N_CORES) as executor:
-            frames = list(tqdm(executor.map(part_files, files), total=len(files),
-                               desc='Downloading and Processing the Data Files', file=sys.stdout))
+    print('Downloading %d data file(s) from the OOI Gold Copy THREDDS catalog' % len(files))
+    frames = parallel_process_files(files, gc='GC', use_dask=use_dask,
+                                    desc='Downloading and Processing the Data Files')
 
     if not frames:
         message = "No data files were downloaded from the Gold Copy THREDDS server."
         warnings.warn(message)
-        return xr.Dataset  # Return an empty dataset if no files were found
+        return xr.Dataset()  # Return an empty dataset if no files were found
 
     # merge the data frames into a single data set
     print('Merging the data files into a single dataset')
@@ -852,7 +833,7 @@ def load_kdata(site, node, sensor, method, stream, tag='*.nc', use_dask=False):
         dask arrays (default=False)
     :return data: All the data, combined into a single dataset
     """
-    # download the data from the Gold Copy THREDDS server
+    # download the data from the local kdata directory
     dataset_id = '-'.join([site, node, sensor, method, stream])
     data = kdata_collect(dataset_id, tag, use_dask)
     return data
@@ -877,15 +858,15 @@ def kdata_collect(dataset_id, tag='*.nc', use_dask=False):
 
     # Create a list of the files from the request above using a simple regex as a tag to discriminate the files
     files = glob.glob(kdata + '/' + tag)
-    frames = []
 
     # Process the data files found above and concatenate them into a single list
-    print('Downloading %d data file(s) from the local kdata directory' % len(files))
+    print('Loading %d data file(s) from the local kdata directory' % len(files))
     return kdata_collect_from_file_list(files, use_dask)
+
 
 def kdata_collect_from_file_list(files, use_dask=False):
     """
-    Collect data from the OOI JupyterHub kdata directory. 
+    Collect data from the OOI JupyterHub kdata directory.
     The collected data is gathered into a xarray dataset for further processing.
 
     :param files: list of files in kdata directory
@@ -893,25 +874,15 @@ def kdata_collect_from_file_list(files, use_dask=False):
         dask arrays (default=False)
     :return gc: the collected Gold Copy data as a xarray dataset
     """
-
     # Process the data files found above and concatenate them into a single list
-    print('Downloading %d data file(s) from the local kdata directory' % len(files))
-    if len(files) <= 5:
-        # just 1 to 5 files, download sequentially
-        frames = [process_file(file, gc='KDATA', use_dask=use_dask) for file in tqdm(files, desc='Loading and '
-                                                                                                 'Processing Data '
-                                                                                                 'Files')]
-    else:
-        # multiple files, use multithreading to download concurrently
-        part_files = partial(process_file, gc='KDATA', use_dask=use_dask)
-        with ProcessPoolExecutor(max_workers=N_CORES) as executor:
-            frames = list(tqdm(executor.map(part_files, files), total=len(files),
-                               desc='Loading and Processing Data Files', file=sys.stdout))
+    print('Loading %d data file(s) from the local kdata directory' % len(files))
+    frames = parallel_process_files(files, gc='KDATA', use_dask=use_dask,
+                                    desc='Loading and Processing Data Files')
 
     if not frames:
         message = "No data files were loaded from the JupyterHub kdata directory."
         warnings.warn(message)
-        return None
+        return xr.Dataset()  # Return an empty dataset if no files were found
 
     # merge the data frames into a single data set
     print('Merging the data files into a single dataset')
@@ -1031,6 +1002,31 @@ def process_file(catalog_file, gc=None, use_dask=False):
     ds.attrs['comment'] = 'Data produced by the OOI M2M API and reworked for use in locally stored NetCDF files.'
 
     return ds
+
+
+def parallel_process_files(files, gc, use_dask=False, desc='Processing Data Files'):
+    """
+    Process a list of files in parallel using dask.
+
+    :param files: list of files to process
+    :param gc: String value to indicate whether the file is from the Gold Copy
+        THREDDS server (gc = GC), the user's M2M THREDDS catalog (gc = M2M),
+        or a user's JupyterHub with access to the kdata (gc = KDATA).
+    :param use_dask: Boolean flag indicating whether to load the data using
+        dask arrays (default=False)
+    :param desc: Description for the progress bar
+    :return: list of xarray datasets
+    """
+    if len(files) < MIN_FILES_FOR_PARALLEL:
+        # just a few files, process sequentially
+        frames = [process_file(file, gc=gc, use_dask=use_dask) for file in tqdm(files, desc=desc)]
+    else:
+        # use dask for parallel processing
+        delayed_tasks = [delayed(process_file)(file, gc=gc, use_dask=use_dask) for file in files]
+        print(f'{desc} ({len(files)} files using dask)')
+        with ProgressBar():
+            frames = list(compute(*delayed_tasks, scheduler='processes', num_workers=N_CORES))
+    return frames
 
 
 def merge_frames(frames):

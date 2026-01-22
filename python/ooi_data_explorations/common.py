@@ -11,8 +11,6 @@
 import argparse
 import glob
 import io
-from os import cpu_count
-
 import dask
 import netrc
 import numpy as np
@@ -44,8 +42,9 @@ adapter = HTTPAdapter(max_retries=retry)
 SESSION.mount('https://', adapter)
 
 # set up constants used in parallel processing
-cpu_count = int(os.cpu_count() / 2) - 1 or 1
-N_CORES = max(1, min(8, cpu_count))  # number of cores/threads to use for parallel processing
+cpu_count = os.cpu_count() or 4
+N_CORES = max(1, min(8, cpu_count // 2 - 1))  # physical cores for local file processing
+N_THREADS = min(16, cpu_count * 2)  # threads for remote downloads (I/O-bound, 2x cores, capped at 16)
 MIN_FILES_FOR_PARALLEL = 5  # minimum number of files to justify using parallel processing
 
 # set the base URL for the M2M interface
@@ -1034,9 +1033,12 @@ def parallel_process_files(files, gc, use_dask=False, desc='Processing Data File
         delayed_tasks = [delayed(process_file)(file, gc=gc, use_dask=use_dask) for file in files]
         print(f'{desc} ({len(files)} files using dask)')
         # Use threads for remote files (network I/O releases GIL) and processes for local files
-        scheduler = 'threads' if gc in ['GC', 'M2M'] else 'processes'
+        if gc in ['GC', 'M2M']:
+            scheduler, num_workers = 'threads', min(N_THREADS, len(files))
+        else:
+            scheduler, num_workers = 'processes', N_CORES
         with ProgressBar():
-            frames = list(compute(*delayed_tasks, scheduler=scheduler, num_workers=N_CORES))
+            frames = list(compute(*delayed_tasks, scheduler=scheduler, num_workers=num_workers))
     return frames
 
 

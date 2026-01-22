@@ -10,6 +10,7 @@
 """
 import argparse
 import glob
+import io
 from os import cpu_count
 
 import dask
@@ -939,12 +940,19 @@ def process_file(catalog_file, gc=None, use_dask=False):
             data = os.path.abspath(catalog_file)
         else:
             if gc == 'GC':
-                # use the Gold Copy THREDDS server OPeNDAP endpoint
-                opendap_url = 'https://thredds.dataexplorer.oceanobservatories.org/thredds/dodsC/'
+                # use the Gold Copy THREDDS server
+                file_url = 'https://thredds.dataexplorer.oceanobservatories.org/thredds/fileServer/'
             else:
-                # use the user's M2M THREDDS server OPeNDAP endpoint
-                opendap_url = 'https://opendap.oceanobservatories.org/thredds/dodsC/'
-            data = re.sub(r'catalog.html\?dataset=', opendap_url, catalog_file)
+                # use the user's M2M THREDDS server
+                file_url = 'https://opendap.oceanobservatories.org/thredds/fileServer/'
+            url = re.sub(r'catalog.html\?dataset=', file_url, catalog_file)
+            r = SESSION.get(url, timeout=(3.05, 120))
+            if r.ok:
+                data = io.BytesIO(r.content)
+            else:
+                failed_file = catalog_file.rpartition('/')[-1]
+                warnings.warn(f'Failed to download {failed_file}')
+                return None
     else:
         raise InputError('gc must be either GC, M2M, or KDATA')
 
@@ -1025,7 +1033,7 @@ def parallel_process_files(files, gc, use_dask=False, desc='Processing Data File
         # use dask for parallel processing - threads for remote I/O, processes for local files
         delayed_tasks = [delayed(process_file)(file, gc=gc, use_dask=use_dask) for file in files]
         print(f'{desc} ({len(files)} files using dask)')
-        # Use threads for remote files (OPeNDAP I/O is network-bound) and processes for local files
+        # Use threads for remote files (network I/O releases GIL) and processes for local files
         scheduler = 'threads' if gc in ['GC', 'M2M'] else 'processes'
         with ProgressBar():
             frames = list(compute(*delayed_tasks, scheduler=scheduler, num_workers=N_CORES))

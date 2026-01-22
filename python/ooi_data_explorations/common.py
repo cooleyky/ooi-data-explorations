@@ -10,8 +10,9 @@
 """
 import argparse
 import glob
+from os import cpu_count
+
 import dask
-import io
 import netrc
 import numpy as np
 import os
@@ -42,7 +43,8 @@ adapter = HTTPAdapter(max_retries=retry)
 SESSION.mount('https://', adapter)
 
 # set up constants used in parallel processing
-N_CORES = min(5, int(os.cpu_count() / 2) - 1)  # number of physical cores to use for parallel processing
+cpu_count = int(os.cpu_count() / 2) - 1 or 1
+N_CORES = max(1, min(8, cpu_count))  # number of cores/threads to use for parallel processing
 MIN_FILES_FOR_PARALLEL = 5  # minimum number of files to justify using parallel processing
 
 # set the base URL for the M2M interface
@@ -240,7 +242,7 @@ def get_parameter_information(parameter_id):
     sources, data product ID, comments,etc.
 
     :param parameter_id: Parameter ID# of interest
-    :return: json object with information on the parameter of interest
+    :return: JSON object with information on the parameter of interest
     """
     r = SESSION.get(BASE_URL + PARAMETER_URL + parameter_id, auth=(AUTH[0], AUTH[2]))
     data = validate_request(r)
@@ -253,7 +255,7 @@ def get_stream_information(stream):
     parameters, units, sources, etc.
 
     :param stream: Stream name of interest
-    :return: json object with information on the contents of the stream
+    :return: JSON object with information on the contents of the stream
     """
     r = SESSION.get(BASE_URL + STREAM_URL + stream, auth=(AUTH[0], AUTH[2]))
     data = validate_request(r)
@@ -315,7 +317,7 @@ def get_sensor_information(site, node, sensor, deploy):
     :param node: Node name to query
     :param sensor: Sensor name to query
     :param deploy: Deployment number
-    :return: json object with the site-node-sensor-deployment specific sensor
+    :return: JSON object with the site-node-sensor-deployment specific sensor
         metadata
     """
     r = SESSION.get(BASE_URL + DEPLOY_URL + site + '/' + node + '/' + sensor + '/' + str(deploy),
@@ -330,7 +332,7 @@ def get_sensor_history(uid):
     specified unique asset identifier (UID).
 
     :param uid: unique asset identifier (UID)
-    :return: json object with the asset and calibration information
+    :return: JSON object with the asset and calibration information
     """
     r = SESSION.get(BASE_URL + ASSET_URL + '/deployments/' +
                     uid + '?editphase=ALL', auth=(AUTH[0], AUTH[2]))
@@ -377,7 +379,7 @@ def get_calibrations_by_uid(uid, to_dataframe=False):
     UID. Results are interchangeable with get_calibrations_by_asset_id.
 
     :param uid: unique asset identifier (UID), e.g. CGINS-DOSTAD-00134
-    :param to_dataframe: convert the calibration json object to a pandas
+    :param to_dataframe: convert the calibration JSON object to a pandas
         dataframe (Optional, default is False)
     :return: calibration information for the identified UID
     """
@@ -388,7 +390,7 @@ def get_calibrations_by_uid(uid, to_dataframe=False):
             return data
         else:
             calInfo = data
-            # Convert the json object to a pandas dataframe
+            # Convert the JSON object to a pandas dataframe
             calibrations = None
             for c in calInfo["calibration"]:
                 for cc in c["calData"]:
@@ -437,7 +439,7 @@ def get_calibrations_by_refdes(site, node, sensor, start=None, stop=None, to_dat
         of record)
     :param stop: Stop time for data request (Optional, default is through the
         end of the record)
-    :param to_dataframe: Converts the returned json object into a pandas
+    :param to_dataframe: Converts the returned JSON object into a pandas
         dataframe (Optional, default is False)
     :return: calibration information for sensor(s) deployed at the specified
         reference designator
@@ -634,7 +636,7 @@ def get_vocabulary(site, node, sensor):
     :param site: Site name to query
     :param node: Node name to query
     :param sensor: Sensor name to query
-    :return: json object with the site-node-sensor specific vocabulary
+    :return: JSON object with the site-node-sensor specific vocabulary
     """
     r = SESSION.get(BASE_URL + VOCAB_URL + site + '/' + node +
                     '/' + sensor, auth=(AUTH[0], AUTH[2]))
@@ -937,26 +939,24 @@ def process_file(catalog_file, gc=None, use_dask=False):
             data = os.path.abspath(catalog_file)
         else:
             if gc == 'GC':
-                # use the Gold Copy THREDDS server
-                dods_url = 'https://thredds.dataexplorer.oceanobservatories.org/thredds/fileServer/'
+                # use the Gold Copy THREDDS server OPeNDAP endpoint
+                opendap_url = 'https://thredds.dataexplorer.oceanobservatories.org/thredds/dodsC/'
             else:
-                # use the user's M2M THREDDS server
-                dods_url = 'https://opendap.oceanobservatories.org/thredds/fileServer/'
-            url = re.sub(r'catalog.html\?dataset=', dods_url, catalog_file)
-            r = SESSION.get(url, timeout=(3.05, 120))
-            if r.ok:
-                data = io.BytesIO(r.content)
-            else:
-                failed_file = catalog_file.rpartition('/')
-                warnings.warn('Failed to download %s' % failed_file[-1])
-                return None
+                # use the user's M2M THREDDS server OPeNDAP endpoint
+                opendap_url = 'https://opendap.oceanobservatories.org/thredds/dodsC/'
+            data = re.sub(r'catalog.html\?dataset=', opendap_url, catalog_file)
     else:
         raise InputError('gc must be either GC, M2M, or KDATA')
 
-    if use_dask:
-        ds = xr.open_dataset(data, decode_cf=False, chunks='auto', mask_and_scale=False)
-    else:
-        ds = xr.load_dataset(data, decode_cf=False, mask_and_scale=False)
+    try:
+        if use_dask:
+            ds = xr.open_dataset(data, decode_cf=False, chunks='auto', mask_and_scale=False)
+        else:
+            ds = xr.load_dataset(data, decode_cf=False, mask_and_scale=False)
+    except OSError as err:
+        failed_file = catalog_file.rpartition('/')[-1]
+        warnings.warn(f'Failed to open {failed_file}: {err}')
+        return None
 
     # convert the dimensions from obs to time and get rid of obs and other variables we don't need
     ds = ds.swap_dims({'obs': 'time'})
@@ -970,7 +970,7 @@ def process_file(catalog_file, gc=None, use_dask=False):
     # since the CF decoding of the time is failing, explicitly reset all instances where the units are
     # seconds since 1900-01-01 to the correct CF units and convert the values to datetime64[ns] types
     time_pattern = re.compile(r'^seconds since 1900-01-01.*$')
-    ntp_date = pd.to_datetime('1900-01-01')
+    ntp_epoch = np.datetime64('1900-01-01T00:00:00', 'ns')
     for v in ds.variables:
         if 'units' in ds[v].attrs.keys():
             if isinstance(ds[v].attrs['units'], str):  # because some units use non-standard characters...
@@ -978,7 +978,8 @@ def process_file(catalog_file, gc=None, use_dask=False):
                     del (ds[v].attrs['_FillValue'])  # no fill values for time!
                     del (ds[v].attrs['units'])       # time units are set via the encoding
                     ds[v].encoding = {'_FillValue': None, 'units': 'seconds since 1900-01-01T00:00:00.000Z'}
-                    np_time = [ntp_date + pd.to_timedelta(i, 's') for i in ds[v].values]
+                    # vectorized conversion: seconds to nanoseconds, then to timedelta64, then add epoch
+                    np_time = ntp_epoch + (ds[v].values * 1e9).astype('timedelta64[ns]')
                     ds[v] = ('time', np_time)
 
     # sort by time
@@ -1021,11 +1022,13 @@ def parallel_process_files(files, gc, use_dask=False, desc='Processing Data File
         # just a few files, process sequentially
         frames = [process_file(file, gc=gc, use_dask=use_dask) for file in tqdm(files, desc=desc)]
     else:
-        # use dask for parallel processing
+        # use dask for parallel processing - threads for remote I/O, processes for local files
         delayed_tasks = [delayed(process_file)(file, gc=gc, use_dask=use_dask) for file in files]
         print(f'{desc} ({len(files)} files using dask)')
+        # Use threads for remote files (OPeNDAP I/O is network-bound) and processes for local files
+        scheduler = 'threads' if gc in ['GC', 'M2M'] else 'processes'
         with ProgressBar():
-            frames = list(compute(*delayed_tasks, scheduler='processes', num_workers=N_CORES))
+            frames = list(compute(*delayed_tasks, scheduler=scheduler, num_workers=N_CORES))
     return frames
 
 

@@ -11,7 +11,6 @@
 import argparse
 import glob
 import io
-import dask
 import netrc
 import numpy as np
 import os
@@ -26,10 +25,10 @@ import pandas as pd
 from bs4 import BeautifulSoup
 from collections.abc import Mapping
 from dask import delayed, compute
-from dask.diagnostics import ProgressBar
 from datetime import datetime, timezone
 from requests.adapters import HTTPAdapter
-from tqdm import tqdm
+from tqdm.dask import TqdmCallback
+from tqdm.auto import tqdm
 from urllib3.util import Retry
 
 # filter future warnings for now
@@ -44,7 +43,7 @@ SESSION.mount('https://', adapter)
 # set up constants used in parallel processing
 cpu_count = os.cpu_count() or 4
 N_CORES = max(1, min(8, cpu_count // 2 - 1))  # physical cores for local file processing
-N_THREADS = min(16, cpu_count * 2)  # threads for remote downloads (I/O-bound, 2x cores, capped at 16)
+N_THREADS = min(8, cpu_count * 2)  # threads for remote downloads (I/O-bound, 2x cores, capped at 8)
 MIN_FILES_FOR_PARALLEL = 5  # minimum number of files to justify using parallel processing
 
 # set the base URL for the M2M interface
@@ -389,19 +388,19 @@ def get_calibrations_by_uid(uid, to_dataframe=False):
         if not to_dataframe:
             return data
         else:
-            calInfo = data
+            cal_info = data
             # Convert the JSON object to a pandas dataframe
             calibrations = None
-            for c in calInfo["calibration"]:
+            for c in cal_info["calibration"]:
                 for cc in c["calData"]:
-                    calDict = {
+                    cal_dict = {
                         "uid": [cc["assetUid"]],
                         "calCoef": [cc["eventName"]],
                         "calDate": [convert_time(cc["eventStartTime"])],
                         "value": [cc["value"]],
                         "calFile": [cc["dataSource"]]
                     }
-                    caldf = pd.DataFrame(calDict)
+                    caldf = pd.DataFrame(cal_dict)
                     if calibrations is None:
                         calibrations = caldf
                     else:
@@ -460,13 +459,13 @@ def get_calibrations_by_refdes(site, node, sensor, start=None, stop=None, to_dat
             return r.json()
         else:
             # Convert to a dataframe and return the dataframe
-            calInfo = data
+            cal_info = data
             calibrations = None
-            for cal in calInfo:
+            for cal in cal_info:
                 deploy_num = cal["deploymentNumber"]
                 for c in cal["sensor"]['calibration']:
                     for cc in c["calData"]:
-                        calDict = {
+                        cal_dict = {
                             "deploymentNumber": [deploy_num],
                             "uid": [cc["assetUid"]],
                             "calCoef": [cc["eventName"]],
@@ -474,7 +473,7 @@ def get_calibrations_by_refdes(site, node, sensor, start=None, stop=None, to_dat
                             "value": [cc["value"]],
                             "calFile": [cc["dataSource"]]
                         }
-                        caldf = pd.DataFrame(calDict)
+                        caldf = pd.DataFrame(cal_dict)
                         if calibrations is None:
                             calibrations = caldf
                         else:
@@ -862,7 +861,6 @@ def kdata_collect(dataset_id, tag='*.nc', use_dask=False):
     files = glob.glob(kdata + '/' + tag)
 
     # Process the data files found above and concatenate them into a single list
-    print('Loading %d data file(s) from the local kdata directory' % len(files))
     return kdata_collect_from_file_list(files, use_dask)
 
 
@@ -957,9 +955,9 @@ def process_file(catalog_file, gc=None, use_dask=False):
 
     try:
         if use_dask:
-            ds = xr.open_dataset(data, decode_cf=False, chunks='auto', mask_and_scale=False)
+            ds = xr.open_dataset(data, decode_cf=False, chunks='auto', mask_and_scale=False, engine='h5netcdf')
         else:
-            ds = xr.load_dataset(data, decode_cf=False, mask_and_scale=False)
+            ds = xr.load_dataset(data, decode_cf=False, mask_and_scale=False, engine='h5netcdf')
     except OSError as err:
         failed_file = catalog_file.rpartition('/')[-1]
         warnings.warn(f'Failed to open {failed_file}: {err}')
@@ -970,9 +968,9 @@ def process_file(catalog_file, gc=None, use_dask=False):
     ds = ds.reset_coords()
     keys = ['obs', 'id', 'provenance', 'driver_timestamp', 'ingestion_timestamp',
             'port_timestamp', 'preferred_timestamp']
-    for key in keys:
-        if key in ds.variables:
-            ds = ds.drop_vars(key)
+    drop_vars = [v for v in ds.variables if v in keys]
+    if drop_vars:
+        ds = ds.drop_vars(drop_vars)
 
     # since the CF decoding of the time is failing, explicitly reset all instances where the units are
     # seconds since 1900-01-01 to the correct CF units and convert the values to datetime64[ns] types
@@ -1025,110 +1023,136 @@ def parallel_process_files(files, gc, use_dask=False, desc='Processing Data File
     :param desc: Description for the progress bar
     :return: list of xarray datasets
     """
+    frames = []
     if len(files) < MIN_FILES_FOR_PARALLEL:
         # just a few files, process sequentially
         frames = [process_file(file, gc=gc, use_dask=use_dask) for file in tqdm(files, desc=desc)]
     else:
-        # use dask for parallel processing - threads for remote I/O, processes for local files
+        # using dask for parallel processing of the available files
         delayed_tasks = [delayed(process_file)(file, gc=gc, use_dask=use_dask) for file in files]
-        print(f'{desc} ({len(files)} files using dask)')
-        # Use threads for remote files (network I/O releases GIL) and processes for local files
-        if gc in ['GC', 'M2M']:
-            scheduler, num_workers = 'threads', min(N_THREADS, len(files))
-        else:
-            scheduler, num_workers = 'processes', N_CORES
-        with ProgressBar():
-            frames = list(compute(*delayed_tasks, scheduler=scheduler, num_workers=num_workers))
+        with TqdmCallback(desc=f'{desc} ({len(files)} files using dask multithreading)'):
+            frames = compute(*delayed_tasks, scheduler='threads', num_workers=min(N_THREADS, len(files)))
+
+    frames = [f for f in frames if f is not None]  # remove any empty frames
     return frames
+
+
+def _align_frames(frames):
+    """
+    Pre-align data variables across all frames so that xr.concat can merge
+    them in a single pass instead of costly one-by-one merging. Frames
+    missing variables found in other frames will have those variables added,
+    filled with NaN (floats), FILL_INT (integers), empty strings, or
+    NaT (date/times).
+
+    :param frames: list of xarray datasets to align
+    :return: list of aligned xarray datasets with a common set of data
+        variables
+    """
+    # build a registry of all data variables with their properties, and
+    # track dimension sizes for non-time dimensions
+    var_info = {}
+    dim_sizes = {}
+    for frame in frames:
+        for d in frame.sizes:
+            if d != 'time' and d not in dim_sizes:
+                dim_sizes[d] = frame.sizes[d]
+        for v in frame.data_vars:
+            if v not in var_info:
+                var_info[v] = {
+                    'dims': frame[v].dims,
+                    'dtype': frame[v].dtype,
+                    'attrs': frame[v].attrs.copy()
+                }
+
+    # add missing variables to each frame
+    aligned = []
+    for frame in frames:
+        missing = set(var_info.keys()) - set(frame.data_vars)
+        if not missing:
+            aligned.append(frame)
+            continue
+
+        new_vars = {}
+        for v in missing:
+            info = var_info[v]
+            dims = info['dims']
+            dtype = info['dtype']
+
+            # determine the shape using the frame's own dimensions where
+            # available, falling back to known sizes from other frames
+            shape = []
+            skip = False
+            for d in dims:
+                if d in frame.sizes:
+                    shape.append(frame.sizes[d])
+                elif d in dim_sizes:
+                    shape.append(dim_sizes[d])
+                else:
+                    skip = True
+                    break
+            if skip:
+                continue
+
+            # create the fill array with the appropriate fill value
+            shape = tuple(shape)
+            if np.issubdtype(dtype, np.floating):
+                fill = np.full(shape, np.nan, dtype=dtype)
+            elif np.issubdtype(dtype, np.integer):
+                fill = np.full(shape, FILL_INT, dtype=dtype)
+            elif np.issubdtype(dtype, np.datetime64):
+                fill = np.full(shape, np.datetime64('NaT'), dtype=dtype)
+            elif np.issubdtype(dtype, np.character) or dtype == np.object_:
+                fill = np.full(shape, '', dtype=dtype)
+            else:
+                continue
+
+            new_vars[v] = xr.DataArray(fill, dims=dims, attrs=info['attrs'])
+
+        if new_vars:
+            frame = frame.assign(new_vars)
+
+        aligned.append(frame)
+
+    return aligned
 
 
 def merge_frames(frames):
     """
     Merge the multiple data frames downloaded from the M2M system or the Gold
-    Copy THREDDS server into a single xarray data set. Keep track of how many
-    frames fail to merge.
+    Copy THREDDS server into a single xarray data set.
 
     :param frames: The data frames to concatenate/merge into a single data set
     :return data: The final, merged data set
     """
-    # merge the list of processed data frames into a single data set
     nframes = len(frames)
-    bad_frames = 0
-    if nframes > 1:
-        try:
-            # first try to just concatenate all the frames; this usually works, but not always
-            data = xr.concat(frames, dim='time')
-        except ValueError:
-            # try merging the frames one-by-one into a single data set
-            data, fail = _frame_merger(frames[0], frames)
-
-            # if all files failed that would suggest the first file is the problem.
-            # try the merge again, resetting the starting frame to skip the first one.
-            if nframes - fail == 1:
-                try:
-                    bad_frames += 1
-                    data = xr.concat(frames[1:], dim='time')
-                except ValueError:
-                    # this data set has issues! try merging one more time, frame by frame
-                    data, fail = _frame_merger(frames[1], frames[1:])
-                    bad_frames += fail
-
-                    # if we still can't merge the frames, then there probably is something more fundamentally wrong,
-                    # and trying to account for it here is not going to be possible
-                    if nframes - 1 - fail == 1:
-                        message = f"Unable to merge the {nframes} files downloaded from the Gold Copy THREDDS server."
-                        warnings.warn(message)
-                        return None
-            else:
-                bad_frames += fail
-    else:
-        # there is just the one
+    if nframes == 1:
         data = frames[0]
+    else:
+        # pre-align variables across all frames and concatenate in a single pass
+        frames = _align_frames(frames)
+        try:
+            data = xr.concat(frames, dim='time')
+        except (ValueError, NotImplementedError) as e:
+            warnings.warn(f'Unable to merge {nframes} data files: {e}')
+            return None
 
-    if bad_frames > 0:
-        message = "{} of the {} downloaded files failed to merge.".format(bad_frames, nframes)
-        warnings.warn(message)
-
+    # Make sure the data is sorted first by the deployment number and then time
     data = data.sortby(['deployment', 'time'])
-    _, index = np.unique(data['time'], return_index=True)
+
+    # Make sure time is unique within a deployment
+    index = pd.DataFrame({
+        'deployment': data['deployment'].values,
+        'time': data['time'].values
+    }).drop_duplicates().index.values
     data = data.isel(time=index)
+
+    # Update some of the metadata
     data.attrs['time_coverage_start'] = ('%sZ' % data.time.min().values)
     data.attrs['time_coverage_end'] = ('%sZ' % data.time.max().values)
     data.attrs['time_coverage_resolution'] = ('P%.2fS' % (np.mean(data.time.diff('time').values).astype(float) / 1e9))
 
     return data
-
-
-def _frame_merger(data, frames):
-    """
-    Internal method used by merge_frames to enumerate through the frames,
-    trying to concatenate/merge the data frames together into a single
-    data set.
-
-    :param data: initial data frame to concatenate/merge with the other frames
-    :param frames: additional frames to add on to the initial data frame
-    :return data: the final concatenated/merged data set
-    :return fail: a count of the number of files that failed
-    """
-    fail = 0
-    for idx, frame in enumerate(frames[1:], start=2):
-        try:
-            # concatenation handles 99% of the cases
-            with dask.config.set(**{'array.slicing.split_large_chunks': False}):
-                data = xr.concat([data, frame], dim='time')
-        except (ValueError, NotImplementedError):
-            try:
-                # try merging the data, usually one of the data files is missing a variable from a co-located
-                # sensor that the system was unable to find
-                _, index = np.unique(data['time'], return_index=True)
-                data = data.isel(time=index)
-                with dask.config.set(**{'array.slicing.split_large_chunks': False}):
-                    data = data.merge(frame, compat='override')
-            except (ValueError, NotImplementedError):
-                # something is just not right with this data file
-                fail += 1
-
-    return data, fail
 
 
 def update_dataset(ds, depth):

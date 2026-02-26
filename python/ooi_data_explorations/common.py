@@ -910,6 +910,34 @@ def list_files(url, tag='.*\\.nc$'):
     return [node.get('href') for node in soup.find_all('a', string=pattern)]
 
 
+def parallel_process_files(files, gc, use_dask=False, desc='Processing Data Files'):
+    """
+    Process a list of files in parallel using dask.
+
+    :param files: list of files to process
+    :param gc: String value to indicate whether the file is from the Gold Copy
+        THREDDS server (gc = GC), the user's M2M THREDDS catalog (gc = M2M),
+        or a user's JupyterHub with access to the kdata (gc = KDATA).
+    :param use_dask: Boolean flag indicating whether to load the data using
+        dask arrays (default=False)
+    :param desc: Description for the progress bar
+    :return: list of xarray datasets
+    """
+    frames = []
+    if len(files) < MIN_FILES_FOR_PARALLEL:
+        # just a few files, process sequentially
+        frames = [process_file(file, gc=gc, use_dask=use_dask) for file in tqdm(files, desc=desc)]
+    else:
+        # using dask for parallel processing of the available files
+        delayed_tasks = [delayed(process_file)(file, gc=gc, use_dask=use_dask) for file in files]
+        with TqdmCallback(desc=f'{desc} ({len(files)} files using dask)',
+                          tqdm_class=tqdm, mininterval=0, miniters=1):
+            frames = compute(*delayed_tasks, scheduler='processes', num_workers=min(N_CORES, len(files)))
+
+    frames = [f for f in frames if f is not None]  # remove any empty frames
+    return frames
+
+
 def process_file(catalog_file, gc=None, use_dask=False):
     """
     Function to download one of the NetCDF files as a xarray data set, convert
@@ -1010,33 +1038,6 @@ def process_file(catalog_file, gc=None, use_dask=False):
     return ds
 
 
-def parallel_process_files(files, gc, use_dask=False, desc='Processing Data Files'):
-    """
-    Process a list of files in parallel using dask.
-
-    :param files: list of files to process
-    :param gc: String value to indicate whether the file is from the Gold Copy
-        THREDDS server (gc = GC), the user's M2M THREDDS catalog (gc = M2M),
-        or a user's JupyterHub with access to the kdata (gc = KDATA).
-    :param use_dask: Boolean flag indicating whether to load the data using
-        dask arrays (default=False)
-    :param desc: Description for the progress bar
-    :return: list of xarray datasets
-    """
-    frames = []
-    if len(files) < MIN_FILES_FOR_PARALLEL:
-        # just a few files, process sequentially
-        frames = [process_file(file, gc=gc, use_dask=use_dask) for file in tqdm(files, desc=desc)]
-    else:
-        # using dask for parallel processing of the available files
-        delayed_tasks = [delayed(process_file)(file, gc=gc, use_dask=use_dask) for file in files]
-        with TqdmCallback(desc=f'{desc} ({len(files)} files using dask multithreading)'):
-            frames = compute(*delayed_tasks, scheduler='threads', num_workers=min(N_THREADS, len(files)))
-
-    frames = [f for f in frames if f is not None]  # remove any empty frames
-    return frames
-
-
 def _align_frames(frames):
     """
     Pre-align data variables across all frames so that xr.concat can merge
@@ -1099,7 +1100,7 @@ def _align_frames(frames):
             if np.issubdtype(dtype, np.floating):
                 fill = np.full(shape, np.nan, dtype=dtype)
             elif np.issubdtype(dtype, np.integer):
-                fill = np.full(shape, FILL_INT, dtype=dtype)
+                fill = np.full(shape, np.iinfo(dtype).max, dtype=dtype)
             elif np.issubdtype(dtype, np.datetime64):
                 fill = np.full(shape, np.datetime64('NaT'), dtype=dtype)
             elif np.issubdtype(dtype, np.character) or dtype == np.object_:

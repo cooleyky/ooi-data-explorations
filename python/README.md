@@ -35,16 +35,27 @@ If you have any comments, questions or issues, please don't hesitate to
 
 ## Installation
 ### Installing via conda or pip
-The `ooi-data-explorations` package is available on [conda-forge](https://anaconda.org/conda-forge/ooi-data-explorations) 
+The `ooi-data-explorations` package is available on [conda-forge](https://anaconda.org/conda-forge/ooi-data-explorations)
 and can be installed into an existing conda environment with the following command:
 ```shell
 conda install -c conda-forge ooi-data-explorations
 ```
-Alternatively, the package can be installed via `pip` from [PyPI](https://pypi.org/project/ooi-data-explorations/) with 
+
+Alternatively, the package can be installed via `pip` from [PyPI](https://pypi.org/project/ooi-data-explorations/) with
 the following command:
 ```shell
 pip install ooi-data-explorations
 ```
+
+**Optional dependencies:** Some processing functions require additional packages that must be installed separately:
+- **PCO2W processing** requires `cgsn-parsers` and `cgsn-processing` (available on conda-forge):
+  ```shell
+  conda install -c conda-forge cgsn-parsers cgsn-processing
+  ```
+- **OPTAA processing** requires `pyseas` (not on PyPI or conda-forge):
+  ```shell
+  pip install https://bitbucket.org/ooicgsn/pyseas/get/develop.zip
+  ```
 
 ### Obtaining the Code and Configuring the Environment
 If you do not have python installed, read about [Installing Bash, Git and Python](#configuring-system-for-python) below 

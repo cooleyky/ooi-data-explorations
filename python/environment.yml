@@ -3,8 +3,22 @@ channels:
   - conda-forge
 dependencies:
   - python=3.12
-  - argcomplete
+  # core ooi-data-explorations dependencies
   - beautifulsoup4
+  - erddapy
+  - gsw
+  - ioos-qc
+  - loguru
+  - munch
+  - packaging
+  - pysolar
+  - pyyaml
+  - requests
+  - s3fs
+  - tqdm
+  - xarray
+  # extended dependencies for OOI data work beyond the core package
+  - argcomplete
   - bottleneck
   - cartopy
   - cgsn_parsers
@@ -12,24 +26,18 @@ dependencies:
   - conda-build
   - distributed
   - ephem
-  - erddapy
   - flox
-  - gsw
   - h5netcdf
   - h5py
   - ipykernel
   - ipympl
-  - ioos-qc
   - iris
-  - loguru
-  - munch
   - nc-time-axis
   - nodejs
   - nose
   - numbagg
   - numexpr
   - opt_einsum
-  - packaging
   - pint
   - pip
   - ppigrf
@@ -37,15 +45,10 @@ dependencies:
   - pyncml
   - pyco2sys
   - pydap
-  - pysolar
-  - pyYAML
-  - s3fs
   - scikit-learn
   - seaborn
   - sparse
   - sphinx
-  - tqdm
-  - xarray
   - xlrd
   - zarr
   - pip:

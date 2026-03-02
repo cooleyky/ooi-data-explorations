@@ -79,8 +79,10 @@ What follows are two ways to set up a code environment to run `ooi-data-explorat
 base using either `conda` or `pip` as the package manager.
 
 #### Create conda environment
-If you prefer to use the `conda` package manager, follow this section to set up the `ooi` environment which has the 
-dependencies needed to run the `ooi-data-explorer` python code and example notebooks.
+If you prefer to use the `conda` package manager, follow this section to set up the `ooi` environment. The
+`environment.yml` file installs the core `ooi-data-explorations` dependencies plus a broader set of packages
+useful for OOI data work (e.g. `cartopy`, `scikit-learn`, `iris`, `pyco2sys`, and others). This is the
+recommended approach for a fully-featured research environment.
 ```shell
 # configure the OOI python environment
 cd ooi-data-explorations/python
@@ -90,15 +92,20 @@ conda develop .
 ```
 
 #### Create a pip environment
-If you prefer to use the `pip` package manager, follow this section to set up the `ooi` environment which has the 
+If you prefer to use the `pip` package manager, follow this section to set up the `ooi` environment which has the
 dependencies needed to run the `ooi-data-explorations` python code and example notebooks.
 ```shell
 python -m venv ooi
 source ooi/bin/activate
 cd ooi-data-explorations/python
-pip install -r requirements.txt
-pip install -e .
+pip install -e .                         # core dependencies only
+pip install -e ".[jupyter]"              # add Jupyter notebook support
+pip install -e ".[extended]"             # add extended research packages
+pip install -e ".[all]"                  # everything
 ```
+Note that two packages used in some workflows are not available on PyPI and must be installed separately:
+- `cgsn-parsers` and `cgsn-processing`: `conda install -c conda-forge cgsn-parsers cgsn-processing`
+- `pyseas`: `pip install https://bitbucket.org/ooicgsn/pyseas/get/develop.zip`
 
 #### Ensure the python environment is available in JupyterHub (or JupyterLab)
 If using this code in a JupyterHub environment, an additional step will be needed to ensure the environment is 

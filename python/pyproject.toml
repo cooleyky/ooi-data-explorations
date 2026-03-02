@@ -41,47 +41,68 @@ dependencies = [
     "numpy>=1.26",
     "packaging>24.1",
     "pandas>=2.2",
-    "argcomplete",
     "beautifulsoup4",
-    "canyonbpy",
-    "distributed",
-    "ephem",
     "erddapy",
     "gsw",
-    "h5py",
     "ioos-qc",
-    "ipykernel",
-    "ipympl",
-    "iris",
     "loguru",
     "munch",
-    "nodejs",
-    "nose",
-    "numexpr",
-    "pint",
-    "ppigrf",
-    "pyco2sys",
-    "pyncml",
     "pysolar",
     "PyYAML",
+    "requests",
     "s3fs",
-    "scikit-learn",
-    "sphinx",
     "tqdm",
-    "xlrd",
 ]
 
 [project.optional-dependencies]
-# cgsn-parsers and cgsn-processing are available on conda-forge:
-#   conda install -c conda-forge cgsn-parsers cgsn-processing
-# pyseas is not on PyPI or conda-forge and must be installed directly:
-#   pip install https://bitbucket.org/ooicgsn/pyseas/get/develop.zip
+# Install extended or full environments with:
+#   pip install -e ".[extended]"
+#   pip install -e ".[jupyter,dev,extended]"  # full environment
+#
+# Note: some packages are not available on PyPI and must be installed separately:
+#   cgsn-parsers, cgsn-processing: conda install -c conda-forge cgsn-parsers cgsn-processing
+#   pyseas: pip install https://bitbucket.org/ooicgsn/pyseas/get/develop.zip
+jupyter = [
+    "ipykernel",
+    "ipympl",
+]
+extended = [
+    "argcomplete",
+    "bottleneck",
+    "cartopy",
+    "canyonbpy",
+    "distributed",
+    "ephem",
+    "flox",
+    "h5netcdf",
+    "h5py",
+    "iris",
+    "nc-time-axis",
+    "numbagg",
+    "numexpr",
+    "opt_einsum",
+    "pint",
+    "ppigrf",
+    "pooch",
+    "pyco2sys",
+    "pydap",
+    "pyncml",
+    "scikit-learn",
+    "seaborn",
+    "sparse",
+    "xlrd",
+    "zarr",
+]
 dev = [
     "pre-commit",
     "ruff",
     "build",
     "hatch",
-    "requests",
+    "nose",
+    "sphinx",
+]
+all = [
+    "ooi_data_explorations[jupyter,extended,dev]",
 ]
 
 [tool.hatch.version]

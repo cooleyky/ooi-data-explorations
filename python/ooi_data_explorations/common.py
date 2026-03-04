@@ -10,7 +10,6 @@
 """
 import argparse
 import glob
-import dask
 import io
 import netrc
 import numpy as np
@@ -25,11 +24,11 @@ import pandas as pd
 
 from bs4 import BeautifulSoup
 from collections.abc import Mapping
-from concurrent.futures import ProcessPoolExecutor
+from dask import delayed, compute
 from datetime import datetime, timezone
-from functools import partial
 from requests.adapters import HTTPAdapter
-from tqdm import tqdm
+from tqdm.dask import TqdmCallback
+from tqdm.auto import tqdm
 from urllib3.util import Retry
 
 # filter future warnings for now
@@ -42,7 +41,10 @@ adapter = HTTPAdapter(max_retries=retry)
 SESSION.mount('https://', adapter)
 
 # set up constants used in parallel processing
-N_CORES = min(10, int(os.cpu_count() / 2) - 1)  # number of physical cores to use for parallel processing
+cpu_count = os.cpu_count() or 4
+N_CORES = max(1, min(8, cpu_count // 2 - 1))  # physical cores for local file processing
+N_THREADS = min(8, cpu_count * 2)  # threads for remote downloads (I/O-bound, 2x cores, capped at 8)
+MIN_FILES_FOR_PARALLEL = 5  # minimum number of files to justify using parallel processing
 
 # set the base URL for the M2M interface
 BASE_URL = 'https://ooinet.oceanobservatories.org/api/m2m/'  # base M2M URL
@@ -73,9 +75,9 @@ try:
     nrc = netrc.netrc()
     AUTH = nrc.authenticators('ooinet.oceanobservatories.org')
     if AUTH is None:
-        raise RuntimeError('No entry found for machine ``ooinet.oceanobservatories.org`` in the .netrc file')
+        warnings.warn('Not entry found for machine ``ooinet.oceanobservatories.org`` in the .netrc file. M2M queries will not work without appropriate authorization.')
 except FileNotFoundError as e:
-    raise OSError(e, os.strerror(e.errno), os.path.expanduser('~'))
+    warnings.warn('NetRC file ({}/.netrc) not found. M2M queries will not work without appropriate authorization.'.format(os.path.expanduser('~')))
 
 # set up a default location to save the data
 home = os.path.expanduser('~')
@@ -110,26 +112,48 @@ class InputError(Error):
     def __init__(self, message):
         self.message = message
 
+
 def convert_time(ms):
     """Calculate UTC timestamp from OOI milliseconds"""
     if ms is None:
         return None
     else:
-        return datetime.utcfromtimestamp(ms/1000)
+        return datetime.fromtimestamp(ms / 1000)
+
+def validate_request(r):
+    """
+    Test the API request to see if it was successful. If the OOI M2M API is
+    down for maintenance, the request will return a 200 status code, but the
+    content will not be valid JSON. This function checks for that and raises
+    an exception if the request was not successful.
+
+    :param r: requests.Response object from the API request
+    :return: JSON data if the request was successful, otherwise None
+    """
+    if r.status_code != requests.codes.ok:
+        raise requests.exceptions.HTTPError(f"Request failed with status code {r.status_code}")
+
+    try:
+        data = r.json()
+    except requests.exceptions.JSONDecodeError:
+        # If the response is not valid JSON, the API is most likely down for maintenance
+        warnings.warn("The OOI M2M API is currently unavailable. Please try again later.")
+        return None
+
+    return data
 
 # Sensor Information
 def list_sites():
     """
-    Returns a list of all the available sites in the system. The list can then be used to either iterate over the sites
-    programmatically or inform the user of the available sites and their codes.
+    Returns a list of all the available sites in the system. The list can then
+    be used to either iterate over the sites programmatically or inform the
+    user of the available sites and their codes.
 
     :return: list of all available sites in the system
     """
     r = SESSION.get(BASE_URL + SENSOR_URL, auth=(AUTH[0], AUTH[2]))
-    if r.status_code == requests.codes.ok:
-        return r.json()
-    else:
-        return None
+    data = validate_request(r)
+    return data
 
 
 def list_nodes(site):
@@ -140,10 +164,8 @@ def list_nodes(site):
     :return: List of the available nodes for this site
     """
     r = SESSION.get(BASE_URL + DEPLOY_URL + site, auth=(AUTH[0], AUTH[2]))
-    if r.status_code == requests.codes.ok:
-        return r.json()
-    else:
-        return None
+    data = validate_request(r)
+    return data
 
 
 def list_sensors(site, node):
@@ -155,130 +177,122 @@ def list_sensors(site, node):
     :return: list of the available sensors for this site and node
     """
     r = SESSION.get(BASE_URL + DEPLOY_URL + site + '/' + node, auth=(AUTH[0], AUTH[2]))
-    if r.status_code == requests.codes.ok:
-        return r.json()
-    else:
-        return None
+    data = validate_request(r)
+    return data
 
 
 def list_methods(site, node, sensor):
     """
-    Based on the site, node and sensor name, list the data delivery methods that are available.
+    Based on the site, node and sensor name, list the data delivery methods
+    that are available.
 
     :param site: Site name to query
     :param node: Node name to query
     :param sensor: Sensor name to query
-    :return: list of the data delivery methods associated with this site, node and sensor
+    :return: list of the data delivery methods associated with this site,
+        node and sensor
     """
     r = SESSION.get(BASE_URL + SENSOR_URL + site + '/' +
                     node + '/' + sensor, auth=(AUTH[0], AUTH[2]))
-    if r.status_code == requests.codes.ok:
-        return r.json()
-    else:
-        return None
+    data = validate_request(r)
+    return data
 
 
 def list_streams(site, node, sensor, method):
     """
-    Based on the site, node and sensor name and the data delivery method, list the data streams that are available.
+    Based on the site, node and sensor name and the data delivery method, list
+    the data streams that are available.
 
     :param site: Site name to query
     :param node: Node name to query
     :param sensor: Sensor name to query
     :param method: Data delivery method to query
-    :return: list of the data streams associated with this site, node, sensor and data delivery method
+    :return: list of the data streams associated with this site, node, sensor
+        and data delivery method
     """
     # Determine the streams associated with the delivery method available for this sensor
     r = SESSION.get(BASE_URL + SENSOR_URL + site + '/' + node + '/' +
                     sensor + '/' + method, auth=(AUTH[0], AUTH[2]))
-    if r.status_code == requests.codes.ok:
-        return r.json()
-    else:
-        return None
+    data = validate_request(r)
+    return data
 
 
 def list_metadata(site, node, sensor):
     """
-    Based on the site, node and sensor names, return a metadata dictionary with the times and parameters available
-    for a sensor.
+    Based on the site, node and sensor names, return a metadata dictionary with
+    the times and parameters available for a sensor.
 
     :param site: Site name to query
     :param node: Node name to query
     :param sensor: Sensor name to query
-    :return: dictionary with the parameters and available time ranges available for the sensor
+    :return: dictionary with the parameters and available time ranges available
+        for the sensor
     """
     r = SESSION.get(BASE_URL + SENSOR_URL + site + '/' + node + '/' +
                     sensor + '/metadata', auth=(AUTH[0], AUTH[2]))
-    if r.status_code == requests.codes.ok:
-        return r.json()
-    else:
-        return None
+    data = validate_request(r)
+    return data
 
 
 # Preload Information
 def get_parameter_information(parameter_id):
     """
-    Use the Parameter ID# to retrieve information about the parameter: units, sources, data product ID, comments,etc.
+    Use the Parameter ID# to retrieve information about the parameter: units,
+    sources, data product ID, comments,etc.
 
     :param parameter_id: Parameter ID# of interest
-    :return: json object with information on the parameter of interest
+    :return: JSON object with information on the parameter of interest
     """
     r = SESSION.get(BASE_URL + PARAMETER_URL + parameter_id, auth=(AUTH[0], AUTH[2]))
-    if r.status_code == requests.codes.ok:
-        return r.json()
-    else:
-        return None
+    data = validate_request(r)
+    return data
 
 
 def get_stream_information(stream):
     """
-    Use the stream name to retrieve information about the stream contents: parameters, units, sources, etc.
+    Use the stream name to retrieve information about the stream contents:
+    parameters, units, sources, etc.
 
     :param stream: Stream name of interest
-    :return: json object with information on the contents of the stream
+    :return: JSON object with information on the contents of the stream
     """
     r = SESSION.get(BASE_URL + STREAM_URL + stream, auth=(AUTH[0], AUTH[2]))
-    if r.status_code == requests.codes.ok:
-        return r.json()
-    else:
-        return None
+    data = validate_request(r)
+    return data
 
 
 # Asset Information
 def get_asset_by_uid(uid):
     """
-    Returns all asset information for a given unique asset identifier or
+    Returns all asset information for a given unique asset identifier or asset
     UID. Results are interchangeable with get_asset_by_asset_id.
 
     :param uid: unique asset identifier (UID), e.g. CGINS-DOSTAD-00134
     :return: asset information for the identified UID
     """
     r = SESSION.get(BASE_URL + ASSET_URL + '?uid=' + uid, auth=(AUTH[0], AUTH[2]))
-    if r.status_code == requests.codes.ok:
-        return r.json()
-    else:
-        return None
+    data = validate_request(r)
+    return data
 
 
 def get_asset_by_asset_id(asset_id):
     """
-    Returns all asset information for a given OOI asset identifier or
-    assetId. Results are interchangeable with get_asset_by_uid.
+    Returns all asset information for a given OOI asset identifier or asset ID.
+    Results are interchangeable with get_asset_by_uid.
 
     :param asset_id: OOI asset identifier (assetId), e.g. 1352
     :return: asset information for the identified assetId
     """
     r = SESSION.get(BASE_URL + ASSET_URL + '/' + str(asset_id), auth=(AUTH[0], AUTH[2]))
-    if r.status_code == requests.codes.ok:
-        return r.json()
-    else:
-        return None
+    data = validate_request(r)
+    return data
 
 
 # Deployment Information
 def list_deployments(site, node, sensor):
     """
-    Based on the site, node and sensor name, list the deployment numbers that are available.
+    Based on the site, node and sensor name, list the deployment numbers that
+    are available.
 
     :param site: Site name to query
     :param node: Node name to query
@@ -287,51 +301,48 @@ def list_deployments(site, node, sensor):
     """
     r = SESSION.get(BASE_URL + DEPLOY_URL + site + '/' +
                     node + '/' + sensor, auth=(AUTH[0], AUTH[2]))
-    if r.status_code == requests.codes.ok:
-        return r.json()
-    else:
-        return None
+    data = validate_request(r)
+    return data
 
 
 def get_sensor_information(site, node, sensor, deploy):
     """
-    Uses the metadata information available from the system for an instrument deployment to obtain the asset and
-    calibration information for the specified sensor and deployment. This information is part of the sensor
+    Uses the metadata information available from the system for an instrument
+    deployment to obtain the asset and calibration information for the
+    specified sensor and deployment. This information is part of the sensor
     metadata specific to that deployment.
 
     :param site: Site name to query
     :param node: Node name to query
     :param sensor: Sensor name to query
     :param deploy: Deployment number
-    :return: json object with the site-node-sensor-deployment specific sensor metadata
+    :return: JSON object with the site-node-sensor-deployment specific sensor
+        metadata
     """
     r = SESSION.get(BASE_URL + DEPLOY_URL + site + '/' + node + '/' + sensor + '/' + str(deploy),
                     auth=(AUTH[0], AUTH[2]))
-    if r.status_code == requests.codes.ok:
-        return r.json()
-    else:
-        return None
+    data = validate_request(r)
+    return data
 
 
 def get_sensor_history(uid):
     """
-    Obtain the asset and calibration information for all deployments for the specified unique asset identifier (UID).
+    Obtain the asset and calibration information for all deployments for the
+    specified unique asset identifier (UID).
 
     :param uid: unique asset identifier (UID)
-    :return: json object with the asset and calibration information
+    :return: JSON object with the asset and calibration information
     """
     r = SESSION.get(BASE_URL + ASSET_URL + '/deployments/' +
                     uid + '?editphase=ALL', auth=(AUTH[0], AUTH[2]))
-    if r.status_code == requests.codes.ok:
-        return r.json()
-    else:
-        return None
+    data = validate_request(r)
+    return data
 
 
 def get_deployment_dates(site, node, sensor, deploy):
     """
-    Based on the site, node and sensor names and the deployment number, determine the start and end times for a
-    deployment.
+    Based on the site, node and sensor names and the deployment number,
+    determine the start and end times for a deployment.
 
     :param site: Site name to query
     :param node: Node name to query
@@ -367,28 +378,29 @@ def get_calibrations_by_uid(uid, to_dataframe=False):
     UID. Results are interchangeable with get_calibrations_by_asset_id.
 
     :param uid: unique asset identifier (UID), e.g. CGINS-DOSTAD-00134
-    :param to_dataframe: convert the calibration json object to a pandas
+    :param to_dataframe: convert the calibration JSON object to a pandas
         dataframe (Optional, default is False)
     :return: calibration information for the identified UID
     """
     r = SESSION.get(BASE_URL + ASSET_URL + '/cal?uid=' + uid, auth=(AUTH[0], AUTH[2]))
-    if r.status_code == requests.codes.ok:
+    data = validate_request(r)
+    if data:
         if not to_dataframe:
-            return r.json()
+            return data
         else:
-            calInfo = r.json()
-            # Convert the json object to a pandas dataframe
+            cal_info = data
+            # Convert the JSON object to a pandas dataframe
             calibrations = None
-            for c in calInfo["calibration"]:
+            for c in cal_info["calibration"]:
                 for cc in c["calData"]:
-                    calDict = {
+                    cal_dict = {
                         "uid": [cc["assetUid"]],
                         "calCoef": [cc["eventName"]],
                         "calDate": [convert_time(cc["eventStartTime"])],
                         "value": [cc["value"]],
                         "calFile": [cc["dataSource"]]
                     }
-                    caldf = pd.DataFrame(calDict)
+                    caldf = pd.DataFrame(cal_dict)
                     if calibrations is None:
                         calibrations = caldf
                     else:
@@ -408,10 +420,8 @@ def get_calibrations_by_asset_id(asset_id):
     :return: calibration information for the identified assetId
     """
     r = SESSION.get(BASE_URL + ASSET_URL + '/cal?assetid=' + str(asset_id), auth=(AUTH[0], AUTH[2]))
-    if r.status_code == requests.codes.ok:
-        return r.json()
-    else:
-        return None
+    data = validate_request(r)
+    return data
 
 
 def get_calibrations_by_refdes(site, node, sensor, start=None, stop=None, to_dataframe=False):
@@ -428,7 +438,7 @@ def get_calibrations_by_refdes(site, node, sensor, start=None, stop=None, to_dat
         of record)
     :param stop: Stop time for data request (Optional, default is through the
         end of the record)
-    :param to_dataframe: Converts the returned json object into a pandas
+    :param to_dataframe: Converts the returned JSON object into a pandas
         dataframe (Optional, default is False)
     :return: calibration information for sensor(s) deployed at the specified
         reference designator
@@ -443,18 +453,19 @@ def get_calibrations_by_refdes(site, node, sensor, start=None, stop=None, to_dat
         raise InputError(
             'You must specify both start and stop time, or leave both of those fields empty.')
 
-    if r.status_code == requests.codes.ok:
+    data = validate_request(r)
+    if data:
         if not to_dataframe:
             return r.json()
         else:
             # Convert to a dataframe and return the dataframe
-            calInfo = r.json()
+            cal_info = data
             calibrations = None
-            for cal in calInfo:
+            for cal in cal_info:
                 deploy_num = cal["deploymentNumber"]
                 for c in cal["sensor"]['calibration']:
                     for cc in c["calData"]:
-                        calDict = {
+                        cal_dict = {
                             "deploymentNumber": [deploy_num],
                             "uid": [cc["assetUid"]],
                             "calCoef": [cc["eventName"]],
@@ -462,7 +473,7 @@ def get_calibrations_by_refdes(site, node, sensor, start=None, stop=None, to_dat
                             "value": [cc["value"]],
                             "calFile": [cc["dataSource"]]
                         }
-                        caldf = pd.DataFrame(calDict)
+                        caldf = pd.DataFrame(cal_dict)
                         if calibrations is None:
                             calibrations = caldf
                         else:
@@ -489,10 +500,8 @@ def get_annotations(site, node, sensor):
     """
     r = SESSION.get(BASE_URL + ANNO_URL + 'find?beginDT=0&refdes=' + site + '-'
                     + node + '-' + sensor, auth=(AUTH[0], AUTH[2]))
-    if r.status_code == requests.codes.ok:
-        return r.json()
-    else:
-        return None
+    data = validate_request(r)
+    return data
 
 
 def add_annotation_qc_flags(ds, annotations):
@@ -509,27 +518,20 @@ def add_annotation_qc_flags(ds, annotations):
     :return ds: The input xarray dataset with the annotation qc flags added as a
         named variable to the dataset.
     """
-    # First, add a local function to convert times
-    def convert_time(ms):
-        if ms is None:
-            return None
-        else:
-            return datetime.utcfromtimestamp(ms/1000)
-
     # First, check the type of the annotations to determine if needed to put into a dataframe
     if type(annotations) is list or type(annotations) is dict:
         annotations = pd.DataFrame(annotations)
 
     # Convert the flags to QARTOD flags
     codes = {
-        None: 0,
+        None: 0,  # No flag set, this is used for notes or other non-QC annotations
         'pass': 1,
         'not_evaluated': 2,
         'suspect': 3,
         'fail': 4,
-        'not_operational': 0,
-        'not_available': 0,
-        'pending_ingest': 0
+        'not_operational': 9,
+        'not_available': 9,
+        'pending_ingest': 9
     }
     annotations['qcFlag'] = annotations['qcFlag'].map(codes).astype('category')
 
@@ -538,8 +540,7 @@ def add_annotation_qc_flags(ds, annotations):
     stream_mask = annotations["stream"].apply(lambda x: True if x == stream or x is None else False)
     annotations = annotations[stream_mask]
 
-    # Explode the annotations so each parameter is hit for each
-    # annotation
+    # Explode the annotations so each parameter is hit for each annotation
     annotations = annotations.explode(column="parameters")
 
     # Get the unique parameters and their associated variable name
@@ -568,8 +569,8 @@ def add_annotation_qc_flags(ds, annotations):
 
         pid_annos = pid_annos.sort_values(by="qcFlag")
 
-        # Create an array of flags to begin setting the qc-values
-        pid_flags = pd.Series(np.zeros(ds.time.values.shape), index=ds.time.values)
+        # Create an array of flags to begin setting the qc-values (set to pass by default)
+        pid_flags = pd.Series(np.ones(ds.time.values.shape), index=ds.time.values)
 
         # For each index, set the qcFlag for each respective time period
         for ind in pid_annos.index:
@@ -615,8 +616,8 @@ def add_annotation_qc_flags(ds, annotations):
         attrs = {
             "comment": comment,
             "long_name": long_name,
-            "flag_values": np.array([1, 2, 3, 4, 9]),
-            "flag_meanings": "pass not_evaluated suspect_or_of_high_interest fail missing_data"
+            "flag_values": np.array([0, 1, 2, 3, 4, 9]),
+            "flag_meanings": "note_or_comment pass not_evaluated suspect_or_of_high_interest fail missing_data"
         }
 
         # Now add to the dataset
@@ -628,39 +629,21 @@ def add_annotation_qc_flags(ds, annotations):
 
 def get_vocabulary(site, node, sensor):
     """
-    Based on the site, node and sensor name download the vocabulary record defining this sensor.
+    Based on the site, node and sensor name download the vocabulary record
+    defining this sensor.
 
     :param site: Site name to query
     :param node: Node name to query
     :param sensor: Sensor name to query
-    :return: json object with the site-node-sensor specific vocabulary
+    :return: JSON object with the site-node-sensor specific vocabulary
     """
     r = SESSION.get(BASE_URL + VOCAB_URL + site + '/' + node +
                     '/' + sensor, auth=(AUTH[0], AUTH[2]))
-    if r.status_code == requests.codes.ok:
-        return r.json()
-    else:
-        return None
+    data = validate_request(r)
+    return data
 
 
-# Requesting and compiling data via synchronous and asynchronous requests
-def m2m_sync(site, node, sensor, method, stream, start=None, stop=None, parameters=None):
-    """
-    TODO
-
-    :param site:
-    :param node:
-    :param sensor:
-    :param method:
-    :param stream:
-    :param start:
-    :param stop:
-    :param parameters:
-    :return:
-    """
-    pass
-
-
+# Requesting and compiling data via asynchronous requests
 def m2m_request(site, node, sensor, method, stream, start=None, stop=None):
     """
     Request data from OOINet for a particular instrument (as defined by the
@@ -698,10 +681,9 @@ def m2m_request(site, node, sensor, method, stream, start=None, stop=None):
     options = begin_date + end_date + '&format=application/netcdf&email=None'
     r = SESSION.get(BASE_URL + SENSOR_URL + site + '/' + node + '/' + sensor + '/' + method + '/' + stream + options,
                     auth=(AUTH[0], AUTH[2]))
-    if r.status_code == requests.codes.ok:
-        data = r.json()
-    else:
-        return None
+    data = validate_request(r)
+    if not data:  # if the request was not successful, return None
+        return data
 
     # wait until the request is completed
     print('Requesting:\n\trefdes: {}-{}-{}\n\tmethod: {}\n\tstream: {}\n\tfrom {} to {}'.format(site, node,
@@ -745,23 +727,14 @@ def m2m_collect(data, tag='.*\\.nc$', use_dask=False):
     files = list_files(url, tag)
 
     # Process the data files found above and concatenate into a single data set
-    print('Downloading %d data file(s) from the user''s OOI M2M THREDDS catalog' % len(files))
-    if len(files) <= 5:
-        # just 1 to 5 files, download sequentially
-        frames = [process_file(file, gc='M2M', use_dask=use_dask) for file in tqdm(files, desc='Downloading and '
-                                                                                               'Processing the Data '
-                                                                                               'Files')]
-    else:
-        # multiple files, use multithreading to download concurrently
-        part_files = partial(process_file, gc='M2M', use_dask=use_dask)
-        with ProcessPoolExecutor(max_workers=N_CORES) as executor:
-            frames = list(tqdm(executor.map(part_files, files), total=len(files),
-                               desc='Downloading and Processing the Data Files', file=sys.stdout))
+    print('Downloading %d data file(s) from the user\'s OOI M2M THREDDS catalog' % len(files))
+    frames = parallel_process_files(files, gc='M2M', use_dask=use_dask,
+                                    desc='Downloading and Processing the Data Files')
 
     if not frames:
         message = 'No data files were downloaded from the user''s M2M THREDDS server.'
         warnings.warn(message)
-        return None
+        return xr.Dataset()  # Return an empty dataset if no files were found
 
     # merge the data frames into a single data set
     print('Merging the data files into a single dataset')
@@ -821,23 +794,14 @@ def gc_collect(dataset_id, tag='.*\\.nc$', use_dask=False):
     files = list_files(url, tag)
 
     # Process the data files found above and concatenate them into a single list
-    print('Downloading %d data file(s) from the OOI Gold Copy THREDSS catalog' % len(files))
-    if len(files) <= 5:
-        # just 1 to 5 files, download sequentially
-        frames = [process_file(file, gc='GC', use_dask=use_dask) for file in tqdm(files, desc='Downloading and '
-                                                                                              'Processing the Data '
-                                                                                              'Files')]
-    else:
-        # multiple files, use multithreading to download concurrently
-        part_files = partial(process_file, gc='GC', use_dask=use_dask)
-        with ProcessPoolExecutor(max_workers=N_CORES) as executor:
-            frames = list(tqdm(executor.map(part_files, files), total=len(files),
-                               desc='Downloading and Processing the Data Files', file=sys.stdout))
+    print('Downloading %d data file(s) from the OOI Gold Copy THREDDS catalog' % len(files))
+    frames = parallel_process_files(files, gc='GC', use_dask=use_dask,
+                                    desc='Downloading and Processing the Data Files')
 
     if not frames:
         message = "No data files were downloaded from the Gold Copy THREDDS server."
         warnings.warn(message)
-        return None
+        return xr.Dataset()  # Return an empty dataset if no files were found
 
     # merge the data frames into a single data set
     print('Merging the data files into a single dataset')
@@ -870,7 +834,7 @@ def load_kdata(site, node, sensor, method, stream, tag='*.nc', use_dask=False):
         dask arrays (default=False)
     :return data: All the data, combined into a single dataset
     """
-    # download the data from the Gold Copy THREDDS server
+    # download the data from the local kdata directory
     dataset_id = '-'.join([site, node, sensor, method, stream])
     data = kdata_collect(dataset_id, tag, use_dask)
     return data
@@ -897,23 +861,28 @@ def kdata_collect(dataset_id, tag='*.nc', use_dask=False):
     files = glob.glob(kdata + '/' + tag)
 
     # Process the data files found above and concatenate them into a single list
-    print('Downloading %d data file(s) from the local kdata directory' % len(files))
-    if len(files) <= 5:
-        # just 1 to 5 files, download sequentially
-        frames = [process_file(file, gc='KDATA', use_dask=use_dask) for file in tqdm(files, desc='Loading and '
-                                                                                                 'Processing Data '
-                                                                                                 'Files')]
-    else:
-        # multiple files, use multithreading to download concurrently
-        part_files = partial(process_file, gc='KDATA', use_dask=use_dask)
-        with ProcessPoolExecutor(max_workers=N_CORES) as executor:
-            frames = list(tqdm(executor.map(part_files, files), total=len(files),
-                               desc='Loading and Processing Data Files', file=sys.stdout))
+    return kdata_collect_from_file_list(files, use_dask)
+
+
+def kdata_collect_from_file_list(files, use_dask=False):
+    """
+    Collect data from the OOI JupyterHub kdata directory.
+    The collected data is gathered into a xarray dataset for further processing.
+
+    :param files: list of files in kdata directory
+    :param use_dask: Boolean flag indicating whether to load the data using
+        dask arrays (default=False)
+    :return gc: the collected Gold Copy data as a xarray dataset
+    """
+    # Process the data files found above and concatenate them into a single list
+    print('Loading %d data file(s) from the local kdata directory' % len(files))
+    frames = parallel_process_files(files, gc='KDATA', use_dask=use_dask,
+                                    desc='Loading and Processing Data Files')
 
     if not frames:
         message = "No data files were loaded from the JupyterHub kdata directory."
         warnings.warn(message)
-        return None
+        return xr.Dataset()  # Return an empty dataset if no files were found
 
     # merge the data frames into a single data set
     print('Merging the data files into a single dataset')
@@ -939,6 +908,34 @@ def list_files(url, tag='.*\\.nc$'):
     soup = BeautifulSoup(page, 'html.parser')
     pattern = re.compile(tag)
     return [node.get('href') for node in soup.find_all('a', string=pattern)]
+
+
+def parallel_process_files(files, gc, use_dask=False, desc='Processing Data Files'):
+    """
+    Process a list of files in parallel using dask.
+
+    :param files: list of files to process
+    :param gc: String value to indicate whether the file is from the Gold Copy
+        THREDDS server (gc = GC), the user's M2M THREDDS catalog (gc = M2M),
+        or a user's JupyterHub with access to the kdata (gc = KDATA).
+    :param use_dask: Boolean flag indicating whether to load the data using
+        dask arrays (default=False)
+    :param desc: Description for the progress bar
+    :return: list of xarray datasets
+    """
+    frames = []
+    if len(files) < MIN_FILES_FOR_PARALLEL:
+        # just a few files, process sequentially
+        frames = [process_file(file, gc=gc, use_dask=use_dask) for file in tqdm(files, desc=desc)]
+    else:
+        # using dask for parallel processing of the available files
+        delayed_tasks = [delayed(process_file)(file, gc=gc, use_dask=use_dask) for file in files]
+        with TqdmCallback(desc=f'{desc} ({len(files)} files using dask)',
+                          tqdm_class=tqdm, mininterval=0, miniters=1):
+            frames = compute(*delayed_tasks, scheduler='processes', num_workers=min(N_CORES, len(files)))
+
+    frames = [f for f in frames if f is not None]  # remove any empty frames
+    return frames
 
 
 def process_file(catalog_file, gc=None, use_dask=False):
@@ -969,39 +966,44 @@ def process_file(catalog_file, gc=None, use_dask=False):
         else:
             if gc == 'GC':
                 # use the Gold Copy THREDDS server
-                dods_url = 'https://thredds.dataexplorer.oceanobservatories.org/thredds/fileServer/'
+                file_url = 'https://thredds.dataexplorer.oceanobservatories.org/thredds/fileServer/'
             else:
                 # use the user's M2M THREDDS server
-                dods_url = 'https://opendap.oceanobservatories.org/thredds/fileServer/'
-            url = re.sub(r'catalog.html\?dataset=', dods_url, catalog_file)
+                file_url = 'https://opendap.oceanobservatories.org/thredds/fileServer/'
+            url = re.sub(r'catalog.html\?dataset=', file_url, catalog_file)
             r = SESSION.get(url, timeout=(3.05, 120))
             if r.ok:
                 data = io.BytesIO(r.content)
             else:
-                failed_file = catalog_file.rpartition('/')
-                warnings.warn('Failed to download %s' % failed_file[-1])
+                failed_file = catalog_file.rpartition('/')[-1]
+                warnings.warn(f'Failed to download {failed_file}')
                 return None
     else:
         raise InputError('gc must be either GC, M2M, or KDATA')
 
-    if use_dask:
-        ds = xr.open_dataset(data, decode_cf=False, chunks='auto', mask_and_scale=False)
-    else:
-        ds = xr.load_dataset(data, decode_cf=False, mask_and_scale=False)
+    try:
+        if use_dask:
+            ds = xr.open_dataset(data, decode_cf=False, chunks='auto', mask_and_scale=False, engine='h5netcdf')
+        else:
+            ds = xr.load_dataset(data, decode_cf=False, mask_and_scale=False, engine='h5netcdf')
+    except OSError as err:
+        failed_file = catalog_file.rpartition('/')[-1]
+        warnings.warn(f'Failed to open {failed_file}: {err}')
+        return None
 
     # convert the dimensions from obs to time and get rid of obs and other variables we don't need
     ds = ds.swap_dims({'obs': 'time'})
     ds = ds.reset_coords()
     keys = ['obs', 'id', 'provenance', 'driver_timestamp', 'ingestion_timestamp',
             'port_timestamp', 'preferred_timestamp']
-    for key in keys:
-        if key in ds.variables:
-            ds = ds.drop_vars(key)
+    drop_vars = [v for v in ds.variables if v in keys]
+    if drop_vars:
+        ds = ds.drop_vars(drop_vars)
 
     # since the CF decoding of the time is failing, explicitly reset all instances where the units are
     # seconds since 1900-01-01 to the correct CF units and convert the values to datetime64[ns] types
     time_pattern = re.compile(r'^seconds since 1900-01-01.*$')
-    ntp_date = np.datetime64('1900-01-01')
+    ntp_epoch = np.datetime64('1900-01-01T00:00:00', 'ns')
     for v in ds.variables:
         if 'units' in ds[v].attrs.keys():
             if isinstance(ds[v].attrs['units'], str):  # because some units use non-standard characters...
@@ -1009,8 +1011,9 @@ def process_file(catalog_file, gc=None, use_dask=False):
                     del (ds[v].attrs['_FillValue'])  # no fill values for time!
                     del (ds[v].attrs['units'])       # time units are set via the encoding
                     ds[v].encoding = {'_FillValue': None, 'units': 'seconds since 1900-01-01T00:00:00.000Z'}
-                    np_time = ntp_date + (ds[v] * 1e9).astype('timedelta64[ns]')
-                    ds[v] = np_time
+                    # vectorized conversion: seconds to nanoseconds, then to timedelta64, then add epoch
+                    np_time = ntp_epoch + (ds[v].values * 1e9).astype('timedelta64[ns]')
+                    ds[v] = ('time', np_time)
 
     # sort by time
     ds = ds.sortby('time')
@@ -1035,93 +1038,122 @@ def process_file(catalog_file, gc=None, use_dask=False):
     return ds
 
 
+def _align_frames(frames):
+    """
+    Pre-align data variables across all frames so that xr.concat can merge
+    them in a single pass instead of costly one-by-one merging. Frames
+    missing variables found in other frames will have those variables added,
+    filled with NaN (floats), FILL_INT (integers), empty strings, or
+    NaT (date/times).
+
+    :param frames: list of xarray datasets to align
+    :return: list of aligned xarray datasets with a common set of data
+        variables
+    """
+    # build a registry of all data variables with their properties, and
+    # track dimension sizes for non-time dimensions
+    var_info = {}
+    dim_sizes = {}
+    for frame in frames:
+        for d in frame.sizes:
+            if d != 'time' and d not in dim_sizes:
+                dim_sizes[d] = frame.sizes[d]
+        for v in frame.data_vars:
+            if v not in var_info:
+                var_info[v] = {
+                    'dims': frame[v].dims,
+                    'dtype': frame[v].dtype,
+                    'attrs': frame[v].attrs.copy()
+                }
+
+    # add missing variables to each frame
+    aligned = []
+    for frame in frames:
+        missing = set(var_info.keys()) - set(frame.data_vars)
+        if not missing:
+            aligned.append(frame)
+            continue
+
+        new_vars = {}
+        for v in missing:
+            info = var_info[v]
+            dims = info['dims']
+            dtype = info['dtype']
+
+            # determine the shape using the frame's own dimensions where
+            # available, falling back to known sizes from other frames
+            shape = []
+            skip = False
+            for d in dims:
+                if d in frame.sizes:
+                    shape.append(frame.sizes[d])
+                elif d in dim_sizes:
+                    shape.append(dim_sizes[d])
+                else:
+                    skip = True
+                    break
+            if skip:
+                continue
+
+            # create the fill array with the appropriate fill value
+            shape = tuple(shape)
+            if np.issubdtype(dtype, np.floating):
+                fill = np.full(shape, np.nan, dtype=dtype)
+            elif np.issubdtype(dtype, np.integer):
+                fill = np.full(shape, np.iinfo(dtype).max, dtype=dtype)
+            elif np.issubdtype(dtype, np.datetime64):
+                fill = np.full(shape, np.datetime64('NaT'), dtype=dtype)
+            elif np.issubdtype(dtype, np.character) or dtype == np.object_:
+                fill = np.full(shape, '', dtype=dtype)
+            else:
+                continue
+
+            new_vars[v] = xr.DataArray(fill, dims=dims, attrs=info['attrs'])
+
+        if new_vars:
+            frame = frame.assign(new_vars)
+
+        aligned.append(frame)
+
+    return aligned
+
+
 def merge_frames(frames):
     """
     Merge the multiple data frames downloaded from the M2M system or the Gold
-    Copy THREDDS server into a single xarray data set. Keep track of how many
-    frames fail to merge.
+    Copy THREDDS server into a single xarray data set.
 
     :param frames: The data frames to concatenate/merge into a single data set
     :return data: The final, merged data set
     """
-    # merge the list of processed data frames into a single data set
     nframes = len(frames)
-    bad_frames = 0
-    if nframes > 1:
-        try:
-            # first try to just concatenate all the frames; this usually works, but not always
-            data = xr.concat(frames, dim='time')
-        except ValueError:
-            # try merging the frames one-by-one into a single data set
-            data, fail = _frame_merger(frames[0], frames)
-
-            # if all files failed that would suggest the first file is the problem.
-            # try the merge again, resetting the starting frame to skip the first one.
-            if nframes - fail == 1:
-                try:
-                    bad_frames += 1
-                    data = xr.concat(frames[1:], dim='time')
-                except ValueError:
-                    # this data set has issues! try merging one more time, frame by frame
-                    data, fail = _frame_merger(frames[1], frames[1:])
-                    bad_frames += fail
-
-                    # if we still can't merge the frames, then there probably is something more fundamentally wrong,
-                    # and trying to account for it here is not going to be possible
-                    if nframes - 1 - fail == 1:
-                        message = f"Unable to merge the {nframes} files downloaded from the Gold Copy THREDDS server."
-                        warnings.warn(message)
-                        return None
-            else:
-                bad_frames += fail
-    else:
-        # there is just the one
+    if nframes == 1:
         data = frames[0]
+    else:
+        # pre-align variables across all frames and concatenate in a single pass
+        frames = _align_frames(frames)
+        try:
+            data = xr.concat(frames, dim='time')
+        except (ValueError, NotImplementedError) as e:
+            warnings.warn(f'Unable to merge {nframes} data files: {e}')
+            return None
 
-    if bad_frames > 0:
-        message = "{} of the {} downloaded files failed to merge.".format(bad_frames, nframes)
-        warnings.warn(message)
-
+    # Make sure the data is sorted first by the deployment number and then time
     data = data.sortby(['deployment', 'time'])
-    _, index = np.unique(data['time'], return_index=True)
+
+    # Make sure time is unique within a deployment
+    index = pd.DataFrame({
+        'deployment': data['deployment'].values,
+        'time': data['time'].values
+    }).drop_duplicates().index.values
     data = data.isel(time=index)
+
+    # Update some of the metadata
     data.attrs['time_coverage_start'] = ('%sZ' % data.time.min().values)
     data.attrs['time_coverage_end'] = ('%sZ' % data.time.max().values)
     data.attrs['time_coverage_resolution'] = ('P%.2fS' % (np.mean(data.time.diff('time').values).astype(float) / 1e9))
 
     return data
-
-
-def _frame_merger(data, frames):
-    """
-    Internal method used by merge_frames to enumerate through the frames,
-    trying to concatenate/merge the data frames together into a single
-    data set.
-
-    :param data: initial data frame to concatenate/merge with the other frames
-    :param frames: additional frames to add on to the initial data frame
-    :return data: the final concatenated/merged data set
-    :return fail: a count of the number of files that failed
-    """
-    fail = 0
-    for idx, frame in enumerate(frames[1:], start=2):
-        try:
-            # concatenation handles 99% of the cases
-            with dask.config.set(**{'array.slicing.split_large_chunks': False}):
-                data = xr.concat([data, frame], dim='time')
-        except (ValueError, NotImplementedError):
-            try:
-                # try merging the data, usually one of the data files is missing a variable from a co-located
-                # sensor that the system was unable to find
-                _, index = np.unique(data['time'], return_index=True)
-                data = data.isel(time=index)
-                with dask.config.set(**{'array.slicing.split_large_chunks': False}):
-                    data = data.merge(frame, compat='override')
-            except (ValueError, NotImplementedError):
-                # something is just not right with this data file
-                fail += 1
-
-    return data, fail
 
 
 def update_dataset(ds, depth):
@@ -1203,6 +1235,7 @@ def update_dataset(ds, depth):
         }
     })
     for v in geo_coords.variables:
+        # noinspection PyTypeChecker
         geo_coords[v].attrs = geo_attrs[v]
 
     # merge the geospatial coordinates into the data set
@@ -1296,8 +1329,9 @@ def update_dataset(ds, depth):
 
 def dt64_epoch(dt64):
     """
-    Convert a panda or xarray date/time value represented as a datetime64 object (nanoseconds since 1970) to a float,
-    representing an epoch time stamp (seconds since 1970-01-01).
+    Convert a panda or xarray date/time value represented as a datetime64
+    object (nanoseconds since 1970) to a float, representing an epoch time
+    stamp (seconds since 1970-01-01).
 
     :param dt64: panda or xarray datatime64 object
     :return epts: epoch time as seconds since 1970-01-01
@@ -1310,8 +1344,8 @@ def dict_update(source, overrides):
     """
     Update a nested dictionary or similar mapping. Modifies ``source`` in place.
 
-    From https://stackoverflow.com/a/30655448. Replaces original dict_update used by poceans-core, also pulled from
-    the same thread.
+    From https://stackoverflow.com/a/30655448. Replaces original dict_update
+    used by poceans-core, which also pulled from the same thread.
     """
     for key, value in overrides.items():
         if isinstance(value, Mapping) and value:

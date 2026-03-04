@@ -17,7 +17,15 @@ from ooi_data_explorations.profilers import create_profile_id, bin_profiles, upd
 from ooi_data_explorations.uncabled.process_optaa import ATTRS, FILL_INT, load_cal_coefficients, apply_dev, \
     apply_tscorr, apply_scatcorr, estimate_chl_poc, calculate_ratios
 
-from pyseas.data.opt_functions import opt_internal_temp, opt_external_temp
+try:
+    from pyseas.data.opt_functions import opt_internal_temp, opt_external_temp
+except ImportError:
+    opt_internal_temp = None
+    opt_external_temp = None
+    _PYSEAS_ERR = (
+        "pyseas is required for OPTAA processing but is not installed. "
+        "Install via: pip install https://bitbucket.org/ooicgsn/pyseas/get/develop.zip"
+    )
 
 # set floating-point error handling for numpy
 _ = np.seterr(all='ignore', divide='warn')
@@ -42,6 +50,10 @@ def optaa_benthic(ds, cal_file):
         coefficients
     :return ds: cleaned up and reprocessed data set
     """
+    # check for required pyseas dependency
+    if opt_internal_temp is None:
+        raise ImportError(_PYSEAS_ERR)
+
     # check to see if there is more than one deployment in the data set
     if len(np.unique(ds['deployment'].values)) > 1:
         raise ValueError('More than one deployment in the data set.  Please structure processing request to process '
@@ -55,7 +67,7 @@ def optaa_benthic(ds, cal_file):
     #   packet_type == always the same, not needed
     #   record_length == always the same, not needed
     #   checksum == not needed, used in data parsing
-    ds = ds.drop(['internal_timestamp', 'pressure_counts', 'serial_number', 'meter_type', 'packet_type',
+    ds = ds.drop_vars(['internal_timestamp', 'pressure_counts', 'serial_number', 'meter_type', 'packet_type',
                   'record_length', 'checksum'])
 
     # check for data from a co-located CTD, if not present create the variables using NaN's as the fill value
@@ -66,7 +78,7 @@ def optaa_benthic(ds, cal_file):
     # pull out the number of wavelengths and serial number and then drop the variables (part of the metadata)
     num_wavelengths = ds.num_wavelengths.values[0].astype(int)
     serial_number = int(re.sub('[^0-9]', '', ds.attrs['SerialNumber']))
-    ds = ds.drop('num_wavelengths')
+    ds = ds.drop_vars('num_wavelengths')
 
     # load the calibration coefficients
     uid = ds.attrs['AssetUniqueID']
@@ -163,7 +175,7 @@ def optaa_benthic(ds, cal_file):
     }, coords={'time': (['time'], burst.time.values), 'wavelength_number': wavelength_number})
 
     # drop the original 2D variables from the burst data set
-    drop = burst.drop(['wavelength_number', 'wavelength_a', 'a_signal', 'a_reference',
+    drop = burst.drop_vars(['wavelength_number', 'wavelength_a', 'a_signal', 'a_reference',
                        'optical_absorption', 'apg', 'apg_ts', 'apg_ts_s',
                        'wavelength_c', 'c_signal', 'c_reference',
                        'beam_attenuation', 'cpg', 'cpg_ts'])
@@ -223,6 +235,10 @@ def optaa_profiler(ds, cal_file):
         coefficients
     :return ds: cleaned up and reprocessed data set
     """
+    # check for required pyseas dependency
+    if opt_internal_temp is None:
+        raise ImportError(_PYSEAS_ERR)
+
     # check to see if there is more than one deployment in the data set
     if len(np.unique(ds['deployment'].values)) > 1:
         raise ValueError('More than one deployment in the data set.  Please structure processing request to process '
@@ -236,7 +252,7 @@ def optaa_profiler(ds, cal_file):
     #   packet_type == always the same, not needed
     #   record_length == always the same, not needed
     #   checksum == not needed, used in data parsing
-    ds = ds.drop(['internal_timestamp', 'pressure_counts', 'serial_number', 'meter_type', 'packet_type',
+    ds = ds.drop_vars(['internal_timestamp', 'pressure_counts', 'serial_number', 'meter_type', 'packet_type',
                   'record_length', 'checksum'])
 
     # check for data from a co-located CTD, if not present create the variables using NaN's as the fill value
@@ -247,7 +263,7 @@ def optaa_profiler(ds, cal_file):
     # pull out the number of wavelengths and serial number and then drop the variable (part of the metadata)
     num_wavelengths = ds.num_wavelengths.values[0].astype(int)
     serial_number = int(re.sub('[^0-9]', '', ds.attrs['SerialNumber']))
-    ds = ds.drop('num_wavelengths')
+    ds = ds.drop_vars('num_wavelengths')
 
     # load the calibration coefficients
     uid = ds.attrs['AssetUniqueID']
@@ -325,7 +341,7 @@ def optaa_profiler(ds, cal_file):
                                desc='Smoothing and binning each profile into 25 cm depth bins ...', file=sys.stdout))
 
         # reset the dataset now using binned profiles
-        binned = [i[0] for i in binned if i is not None]
+        binned = [i for i in binned if i is not None]
         binned = xr.concat(binned, 'time')
         binned = binned.sortby(['profile', 'time'])
 
@@ -380,7 +396,7 @@ def optaa_profiler(ds, cal_file):
     }, coords={'time': (['time'], binned.time.values), 'wavelength_number': wavelength_number})
 
     # drop the original 2D variables from the binned data set
-    drop = binned.drop(['wavelength_number', 'wavelength_a', 'a_signal', 'a_reference',
+    drop = binned.drop_vars(['wavelength_number', 'wavelength_a', 'a_signal', 'a_reference',
                         'optical_absorption', 'apg', 'apg_ts', 'apg_ts_s',
                         'wavelength_c', 'c_signal', 'c_reference',
                         'beam_attenuation', 'cpg', 'cpg_ts'])
